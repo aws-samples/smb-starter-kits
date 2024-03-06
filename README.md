@@ -1,11 +1,6 @@
-## My Project
+## SMB Starter Kits
 
-TODO: Fill this README out!
-
-Be sure to:
-
-* Change the title in this README
-* Edit your repository description on GitHub
+Starter Kits are CloudFormation templates which create AWS solutions which solve for business problems. You may find all GTM materials plus Deployment Guides, Troubleshooting Guides and more in APN Marketing Central.
 
 ## Security
 
