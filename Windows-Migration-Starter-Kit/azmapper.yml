@@ -1,0 +1,181 @@
+#
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy of this
+# software and associated documentation files (the "Software"), to deal in the Software
+# without restriction, including without limitation the rights to use, copy, modify,
+# merge, publish, distribute, sublicense, and/or sell copies of the Software, and to
+# permit persons to whom the Software is furnished to do so.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+# INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+# PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
+# HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+# OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+# SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+#
+AWSTemplateFormatVersion: 2010-09-09
+Description: > 
+  Creates an AZ Map so that the correct availability zones can be chosen by the 
+  Windows Migration Starter Kit. 
+Resources:
+# Lambda function invoker
+  AzMapper: 
+    Type: Custom::AzMapper
+    Properties: 
+      ServiceToken: !GetAtt AzMapperLambdaFunction.Arn 
+# Lambda function role
+  AzMapperLambdaExecutionRole:
+    Metadata:
+      checkov:
+        skip:
+          - id: "CKV_AWS_108"
+            comment: "This action does not support resource-level permissions. Policies granting access must specify * in the resource element."
+          - id: "CKV_AWS_111"
+            comment: "This action does not support resource-level permissions. Policies granting access must specify * in the resource element."
+      cfn_nag: 
+        rules_to_suppress: 
+          - id: W11
+            reason: "This action does not support resource-level permissions. Policies granting access must specify * in the resource element."
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: "/"
+      Policies:
+        - PolicyName: root
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: arn:aws:logs:*:*:*
+              - Effect: Allow
+                Action:
+                  - ssm:DescribeParameters
+                  - ssm:GetParameter
+                  - ssm:PutParameter
+                  - ssm:DeleteParameter
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeAvailabilityZones
+                Resource: "*"
+  # Lambda function
+  AzMapperLambdaFunction:
+    Metadata:
+      checkov:
+        skip: 
+          - id: "CKV_AWS_115"
+            comment: "This Lambda function will be run only once at creation."
+          - id: "CKV_AWS_116"
+            comment: "SNS Topic configured after - this function only serves to create an AZ Map necessary to creating a stack"
+          - id: "CKV_AWS_117"
+            comment: "VPC creation is dependent on this function."
+          - id: "CKV_AWS_173"
+            comment: "Function uses default service key."
+      cfn_nag:
+        rules_to_suppress: 
+          - id: W77
+            reason: "This Lambda function will be run only once at creation."
+          - id: W89
+            reason: "VPC creation is dependent on this Lambda function"
+          - id: W92
+            reason: "This Lambda functions runs only once at creation"
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: This function creates an AZ Map so that the correct availability zones can be chosen in the Windows Migration Template. Do Not delete this function from here, instead delete from CloudFormation.
+      FunctionName: create-azmap-lambda-function2
+      Runtime: python3.12
+      Timeout: 15
+      Environment: 
+        Variables: 
+          selectedRegion: 
+            Fn::Sub: "${AWS::Region}" 
+      Role: !GetAtt AzMapperLambdaExecutionRole.Arn
+      Handler: index.lambda_handler
+      Code: 
+        ZipFile: |
+          import os
+          import boto3
+          import cfnresponse 
+          selectedRegion = os.environ['selectedRegion']
+          # This python script is part of azmapper.yml - a cloudformation template which deploys a CloudFormation custom resource via this script.
+          # The AZ Mapper maps AZ ID's to AZ Names so that the correct AZ's are chosen for the WIndows Migration Starter Kit stack deployment. Without this,
+          # there are no checks to make sure that WorkSpaces can be added without any issues (WorkSpaces is only available in specific region/AZ pairs)
+          def lambda_handler(event, context):
+              """Lambda Handler Function for CRUD Operations"""
+              if event['RequestType'] == 'Create':
+                  create_parameters(selectedRegion)
+              elif event['RequestType'] == 'Update':
+                  delete_parameters()
+                  create_parameters(selectedRegion)
+              elif event['RequestType'] == 'Delete':
+                  delete_parameters()
+
+              response_data = {}
+              cfnresponse.send(event, context, cfnresponse.SUCCESS, response_data)
+
+          # This function creates the SSM paramaters for AZ Mappings. 
+          def create_parameters(selectedRegion):
+              """Creates the AZ Mappings and stores them as SSM Parameters"""
+              if selectedRegion == "us-east-1": 
+                  azIds = ["use1-az1","use1-az2","use1-az3","use1-az4","use1-az5","use1-az6"]
+              elif selectedRegion == "us-west-2":
+                  azIds = ["usw2-az1","usw2-az2","usw2-az3","usw2-az4"]
+              elif selectedRegion == "ca-central-1":
+                  azIds = ["cac1-az1","cac1-az2","cac1-az3"]
+              elif selectedRegion == "us-east-2":
+                  azIds = ["use2-az1","use2-az2","use2-az3"]
+              elif selectedRegion == "us-west-1":
+                  azIds = ["usw1-az1","usw1-az3"]
+
+              for azId in azIds: 
+                  ec2client = boto3.client('ec2')
+                  ec2_response = ec2client.describe_availability_zones(
+                      Filters=[
+                          {
+                              'Name': 'zone-id',
+                              'Values': [azId]
+                          }
+                      ]
+                  )
+                  for i in ec2_response['AvailabilityZones']:
+                      azId = i['ZoneId']
+                      azName = i['ZoneName']
+                      ssmclient = boto3.client('ssm')   
+                      ssmclient.put_parameter(
+                          Name='azmap-'+azId,
+                          Type='String',
+                          Value=azName,
+                          Overwrite=True,
+                          Tier='Standard'
+                      )
+
+          # This function deletes the SSM parameters for AZ Mappings.
+          def delete_parameters(): 
+              """Deletes parameters"""
+              ssmclient = boto3.client('ssm')
+              ssm_response = ssmclient.describe_parameters(
+                  Filters=[
+                      {
+                          'Key': 'Name',
+                          'Values': ['azmap']
+                      }
+                  ]
+              )
+              for i in ssm_response['Parameters']:
+                  ssmclient.delete_parameter(
+                      Name=i['Name']
+                  )

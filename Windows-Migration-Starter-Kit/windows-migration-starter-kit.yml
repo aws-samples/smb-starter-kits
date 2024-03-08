@@ -1,0 +1,3906 @@
+# CloudFormation template for an AWS Well Architected Windows domain migration. 
+#  
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+
+# Permission is hereby granted, free of charge, to any person obtaining a copy of this
+# software and associated documentation files (the "Software"), to deal in the Software
+# without restriction, including without limitation the rights to use, copy, modify,
+# merge, publish, distribute, sublicense, and/or sell copies of the Software, and to
+# permit persons to whom the Software is furnished to do so.
+
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+# INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+# PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
+# HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+# OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+# SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+#
+# *** IMPORTANT *** IMPORTANT *** IMPORTANT *** IMPORTANT ***
+#
+# *** YOU MUST DEPLOY THE AZMAPPER STACK IN CLOUDFORMATION PRIOR TO DEPLOYING THIS STACK OR STACK DEPLOYMENT WILL FAIL. *** 
+# 
+# This Starter Kit template deploys all AWS components required to run a Migrated Windows Domain in AWS in accordance with the Well-Architected Framework. 
+#  It deploys the following:
+#  - VPC with 1 Public Subnet and 4 Private Subnets across 2 Availability Zones for Resiliency
+#  - All Route Tables 
+#  - Network Access Control Lists (NACLs) for each subnet
+#  - NAT Gateway
+#  - Internet Gateway
+#  - VPN Tunnel from on-premise to the VPC
+#  - 2 EC2 Windows Domain Controllers
+#  - 1 EC2 Windows File Server with File Server Storage configurable to 50GB, 100GB, 250GB (Default), 500GB or 1TB.
+#  - Security Groups which secure the EC2 Windows Instances to least privilege
+#  - Generated helper scripts which automate the migration of Active Directory and the File Server from on-prem to the new VPC-based servers
+#  - A Backup plan which backs up all servers in a 30 day hourly and 12 month monthly rotation
+#  - A Backup Vault where the backups are stored
+#  - A CloudWatch Performance Dashboard which monitors VPN Tunnel and basic server health
+#  - KMS Key for encryption of Cloudwatch alarms at rest and required security policy to manage and use the key
+#  - CloudWatch Alarms which monitor for critical conditions which require immediate action and notify you via email 
+#  - A SNS Topic which notifies you via email when a CloudWatch alarm is triggered (You must confirm subscription to the topic from the email confirmation)
+#  - Basic Setup of Systems Manager to enable RDP Access to the Windows Servers from the AWS Console 
+#
+#  In most cases, the default IPv4 addressing and EC2 instance naming convention should not interfere with on-prem addresses and machine names. 
+#  It is recommended that these settings are reviewed before deployment. See Deployment Guide for details. 
+#
+#  This template exports outputs to facilitate easy additions of future services or components such as additional servers, VDI (WorkSpaces), Database, etc. 
+#  It is recommended that these values are NOT changed in any way. 
+#
+#  If you wish to delete this Starter Kit, you must delete the backup jobs in the backup vault first (or delete the entire vault). After deletion, you can delete any CloudWatch 
+#  log groups created by this Starter Kit. DELETING THIS STACK WILL DELETE ALL RESOURCES WITHOUT ANY CHANCE OF RESTORATION. USE THE POWER OF THE DELETE BUTTON 
+#  WITH EXTREME CAUTION. 
+#
+# YOU ARE RESPONSIBLE FOR PROVIDING A PATCH MANAGEMENT SOLUTION. Many MSP's already have a favored RMM solution that they integrate into
+# cloud deployments and this Starter Kit will work with any RMM. If you do not have an RMM, Systems Manager has a free Patch management tool which is easy to use.
+# A Starter Kit add-on to add Systems Manager Patch Manager to this kit is on the development roadmap.
+#
+# For more details, refer to the Deployment Guide and Troubleshooting Guide.
+#
+# Sample code, software libraries, command line tools, proofs of concept, templates, or other related technology are provided as 
+# AWS Content or Third-Party Content under the AWS Customer Agreement, or the relevant written agreement between you and AWS
+# (whichever applies). You are responsible for testing, securing, and optimizing the AWS Content or Third-Party Content, such as 
+# sample code, as appropriate for production grade use based on your specific quality control practices and standards. Deploying AWS 
+# Content or Third-Party Content may incur AWS charges for creating or using AWS chargeable resources, such as running Amazon EC2 
+# instances or using Amazon S3 storage.
+#
+AWSTemplateFormatVersion: 2010-09-09
+Description: >
+  This template deploys all AWS components required to run a Migrated Windows Domain in AWS in accordance with the Well-Architected Framework. 
+  Refer to the Deployment Guide for details.
+# Sections out the Inputs by Required and Optional to make parameters easy to read and use.
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - 
+        Label:
+          default: REQUIRED Configuration Information - On Premise Network and Domain Information
+        Parameters:
+          - vCPUType
+          - OnPremCidr
+          - OnPremDcIp
+          - OnPremDomainName
+          - OnPremGatewayPublicIp
+          - AlertsEmailAddress
+      -
+        Label:
+          default: OPTIONAL File Migration Automation - If you would like a helper script buiilt for File Server migration, enter your File Server information below.
+        Parameters:
+          - OnPremFsName
+          - OnPremFsShares
+          - DataDriveDiskSize
+      -
+        Label:
+          default: OPTIONAL Network Configuration Information - if your on-premise network does not overlap with 10.32.0.0/16, the below defaults will more than likely work without issues. If there is overlap, or you wish to customize your network and computer names, you may change these default values.
+        Parameters:
+          - AwsVpcCidr
+          - PublicSubnet1Cidr
+          - DcSubnet1Cidr
+          - DcSubnet2Cidr
+          - ClientSubnet1Cidr
+          - ClientSubnet2Cidr
+          - VpcDc1Ip
+          - VpcDc1Name
+          - VpcDc2Ip
+          - VpcDc2Name
+          - VpcFs1Ip
+          - VpcFs1Name
+# Parameters Section
+Parameters:
+  vCPUType:
+    Description: Enter the vCPU Type for the EC2 Windows Instances. For Comparison of Instance Types, see https://aws.amazon.com/ec2/instance-types/
+    Type: String
+    AllowedValues:
+      - AMD-EPYC-Included
+      - Intel-Xeon-IceLake-Adds-$12-Monthly
+  OnPremCidr:
+    Description: On Prem Subnet Range. 
+    Type: String
+    MinLength: 10
+    MaxLength: 18
+    AllowedPattern: '\b(?:\d{1,3}\.){3}\d{1,3}(?:\/(?:3[0-2]|[12]?[0-9]))\b'
+    Default: 192.168.1.0/24
+  OnPremDcIp:
+    Description: Enter the IPv4 Address of the on-premise domain controller. 
+    Type: String
+    MinLength: 7
+    MaxLength: 15
+    AllowedPattern: '\b(?:\d{1,3}\.){3}\d{1,3}\b'
+    Default: 192.168.1.10
+  OnPremDomainName:
+    Description: Enter the Windows Domain Name for the on-premise network.
+    Type: String
+    MinLength: 3
+    MaxLength: 50
+    AllowedPattern: '^(?!:\/\/)(?:[a-zA-Z0-9-]{1,63}\.)+[a-zA-Z]{2,63}$'
+    Default: mydomain.local
+  OnPremGatewayPublicIp:
+    Description: Enter the IPv4 Address of the on-premise firewall or gateway device
+    Type: String
+    MinLength: 7
+    MaxLength: 15
+    AllowedPattern: '\b(?:\d{1,3}\.){3}\d{1,3}\b'
+    Default: 1.2.3.4
+  AlertsEmailAddress:
+    Description: Enter the email address of where monitoring alerts should be sent to
+    Type: String
+    AllowedPattern: ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$
+    Default: email@domain.com
+  OnPremFsName: 
+    Description: The Computer Name of the On-Premise File Server that will be migrated (NOT The FQDN).
+    Type: String
+    MinLength: 3
+    MaxLength: 50
+    AllowedPattern: ^[a-zA-Z0-9_-]{1,15}$
+    Default: premfileserver1
+  OnPremFsShares: 
+    Description: Enter the Shared Folder Share Names, seperated by commas (no spaces.)
+    Type: String
+    MinLength: 3
+    MaxLength: 100
+    AllowedPattern: ^[^\\/:\*\?"<>\|]+(,[^\\/:\*\?"<>\|]+)*$
+    Default: public,private
+  DataDriveDiskSize:
+    Description: The Size of the D Drive for shared file resources on the file server. 250GB is the default. 
+    Type: String 
+    Default: 250GB-Included
+    AllowedValues: 
+      - 250GB-Included
+      - 50GB-Subtracts-$30-Monthly
+      - 100GB-Subtracts-$20-Monthly
+      - 500GB-Adds-$48-Monthly
+      - 1TB-Adds-$148-Monthly
+  AwsVpcCidr:
+    Description: Default CIDR Range for the AWS VPC
+    Type: String
+    MinLength: 10
+    MaxLength: 18
+    AllowedPattern: '\b(?:\d{1,3}\.){3}\d{1,3}(?:\/(?:3[0-2]|[12]?[0-9]))\b'
+    Default: 10.32.0.0/16
+  PublicSubnet1Cidr:
+    Description: Default CIDR Range for Public Subnet1
+    Type: String
+    MinLength: 10
+    MaxLength: 18
+    AllowedPattern: '\b(?:\d{1,3}\.){3}\d{1,3}(?:\/(?:3[0-2]|[12]?[0-9]))\b'
+    Default: 10.32.0.0/24
+  DcSubnet1Cidr:
+    Description: Default CIDR Range for Private Subnet1
+    Type: String
+    MinLength: 10
+    MaxLength: 18
+    AllowedPattern: '\b(?:\d{1,3}\.){3}\d{1,3}(?:\/(?:3[0-2]|[12]?[0-9]))\b'
+    Default: 10.32.8.0/28
+  DcSubnet2Cidr:
+    Description: Default CIDR Range for Private Subnet2
+    Type: String
+    MinLength: 10
+    MaxLength: 18
+    AllowedPattern: '\b(?:\d{1,3}\.){3}\d{1,3}(?:\/(?:3[0-2]|[12]?[0-9]))\b'
+    Default: 10.32.8.128/28
+  ClientSubnet1Cidr:
+    Description: Default CIDR Range for Private Subnet3 
+    Type: String
+    MinLength: 10
+    MaxLength: 18
+    AllowedPattern: '\b(?:\d{1,3}\.){3}\d{1,3}(?:\/(?:3[0-2]|[12]?[0-9]))\b'
+    Default: 10.32.10.0/24
+  ClientSubnet2Cidr:
+    Description: Default CIDR Range for Private Subnet4 
+    Type: String
+    MinLength: 10
+    MaxLength: 18
+    AllowedPattern: '\b(?:\d{1,3}\.){3}\d{1,3}(?:\/(?:3[0-2]|[12]?[0-9]))\b'
+    Default: 10.32.11.0/24
+  VpcDc1Ip:
+    Description: IP Address of Domain Controller
+    Type: String
+    MinLength: 7
+    MaxLength: 15
+    AllowedPattern: '\b(?:\d{1,3}\.){3}\d{1,3}\b'
+    Default: 10.32.8.4
+  VpcDc1Name:
+    Description: Name of Domain Controller
+    Type: String
+    MinLength: 2
+    MaxLength: 15
+    AllowedPattern: '^(?!-)[a-zA-Z0-9-]{1,15}$'
+    Default: vpc-dc01
+  VpcDc2Ip:
+    Description: IP Address of Domain Controller
+    Type: String
+    MinLength: 7
+    MaxLength: 15
+    AllowedPattern: '\b(?:\d{1,3}\.){3}\d{1,3}\b'
+    Default: 10.32.8.132
+  VpcDc2Name:
+    Description: Name of Domain Controller
+    Type: String
+    MinLength: 2
+    MaxLength: 15
+    AllowedPattern: '^(?!-)[a-zA-Z0-9-]{1,15}$'
+    Default: vpc-dc02
+  VpcFs1Ip:
+    Description: IP Address of File Server
+    Type: String
+    MinLength: 7
+    MaxLength: 15
+    AllowedPattern: '\b(?:\d{1,3}\.){3}\d{1,3}\b'
+    Default: 10.32.10.4
+  VpcFs1Name:
+    Description: Name of File Server
+    Type: String
+    MinLength: 2
+    MaxLength: 15
+    AllowedPattern: '^(?!-)[a-zA-Z0-9-]{1,15}$'
+    Default: vpc-fs01
+  LatestAmiId:
+    Description: >
+      This field is for selecting the EC2 Instance OS. The default value selects the latest Windows Server 2022 Image. If it is necessary,
+      you can specify a different image or previous OS.
+    Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
+    Default: '/aws/service/ami-windows-latest/Windows_Server-2022-English-Full-Base'
+Conditions: 
+  RegionIsUsEast1:
+    Fn::Equals:
+      - !Ref 'AWS::Region'
+      - us-east-1
+  RegionIsUsWest2: 
+    Fn::Equals:
+      - !Ref 'AWS::Region'
+      - us-west-2
+  RegionIsCaCentral1: 
+    Fn::Equals:
+      - !Ref 'AWS::Region'
+      - ca-central-1
+  RegionIsUsEast2: 
+    Fn::Equals:
+      - !Ref 'AWS::Region'
+      - us-east-2
+  VcpuIsAmd:
+    Fn::Equals:
+      - !Ref vCPUType
+      - AMD-EPYC-Included
+  FsStorageIs50G:
+    Fn::Equals:
+      - !Ref DataDriveDiskSize
+      - 50GB-Subtracts-$30-Monthly
+  FsStorageIs100G: 
+    Fn::Equals:
+      - !Ref DataDriveDiskSize
+      - 100GB-Subtracts-$20-Monthly
+  FsStorageIs500G:
+    Fn::Equals:
+      - !Ref DataDriveDiskSize
+      - 500GB-Adds-$48-Monthly
+  FsStorageIs1T: 
+    Fn::Equals:
+      - !Ref DataDriveDiskSize
+      - 1TB-Adds-$148-Monthly
+Resources: 
+#This creates the role that gets attached to the EC2 instances for Systems Manager access to the instances.
+  ssmRoleForInstances: 
+    Metadata:
+      cfn_nag: 
+        rules_to_suppress: 
+          - id: W28
+            reason: "Resource will not be replaced in an update" 
+    Type: AWS::IAM::Role
+    Properties: 
+      RoleName: !Sub ${AWS::Region}-ssm-role-for-windows-instances
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal: 
+              Service: 
+                - "ec2.amazonaws.com"
+            Action: 
+              - "sts:AssumeRole"
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore"
+      Tags: 
+        - Key: Name
+          Value: !Sub ${AWS::Region}-ssm-role-for-windows-instances
+        - Key: AWS Starter-Kit-Name
+          Value: Windows-Migration 
+  theInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties: 
+      InstanceProfileName: ssm-for-ec2-profile
+      Roles: 
+        - !Ref ssmRoleForInstances     
+# Creates VPC.
+  vpc:
+    Metadata: 
+      cfn_nag:
+        rules_to_suppress: 
+          - id: W60
+            reason: "VPC Flow Logs built into add on stack"
+    Type: AWS::EC2::VPC 
+    Properties:
+      CidrBlock: !Ref AwsVpcCidr
+      EnableDnsHostnames: true  
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-vpc
+        - Key: AWS Starter-Kit-Name
+          Value: Windows-Migration
+#Public Subhet 1. Note that this Starter Kit has 1 Public Subnet with 1 NAT Gateway for cost optimization purposes. You can add an additional public subnet 
+#and NAT Gateway in the HA NAT Starter Kit Add-on.
+  subnetPublic1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref vpc
+      CidrBlock: !Ref PublicSubnet1Cidr
+      AvailabilityZone: 
+        Fn::Select:
+          - 0
+          - Fn::GetAZs: ''
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-Public-Subnet-1
+        - Key: AWS Starter-Kit-Name
+          Value: Windows-Migration
+# Private subnet 1. For Domain Controller and AD ENIs only.
+  subnetPrivate1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref vpc
+      CidrBlock: !Ref DcSubnet1Cidr
+      AvailabilityZone:
+        Fn::Select:
+          - 0
+          - Fn::GetAZs: ''
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-DC-Subnet-1
+        - Key: AWS Starter-Kit-Name
+          Value: Windows-Migration
+#Private subnet 2. For Domain Controller and ED ENIs only.
+  subnetPrivate2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref vpc
+      CidrBlock: !Ref DcSubnet2Cidr
+      AvailabilityZone:
+        Fn::Select:
+          - 1
+          - Fn::GetAZs: ''
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-DC-Subnet-2
+        - Key: AWS Starter-Kit-Name
+          Value: Windows-Migration
+#Private subnet 3. For use of Windows member servers, and Workspaces or other Domain clients. Note - This maps AZ's based on region deployed so that compatibility
+#with Workspaces is assured at deployment. This is a code unit test and maintenance item - as more Regions/AZs are openedfor WorkSpaces, this code will have to be modified. It 
+#refers to the parameters created by AZMapper.
+  subnetPrivate3:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref vpc
+      CidrBlock: !Ref ClientSubnet1Cidr
+      AvailabilityZone: 
+        Fn::If: 
+          - RegionIsUsEast1
+          - '{{resolve:ssm:azmap-use1-az4}}'
+          - Fn::If:
+            - RegionIsUsWest2
+            - '{{resolve:ssm:azmap-usw2-az2}}'
+            - Fn::If: 
+              - RegionIsCaCentral1
+              - '{{resolve:ssm:azmap-cac1-az1}}'
+              - Fn::If:
+                - RegionIsUsEast2
+                - us-east-2a
+                - us-west-1a
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-Clients-Subnet-1
+        - Key: AWS Starter-Kit-Name
+          Value: Windows-Migration
+#Private subnet 4. For use of Windows member servers, and Workspaces or other Domain clients. Note - This maps AZ's based on region deployed so that compatibility
+#with Workspaces is assured at deployment. This is a code unit test and maintenance item - as more Regions/AZs are openedfor WorkSpaces, this code will have to be modified.  It 
+#refers to the parameters created by AZMapper.
+  subnetPrivate4:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref vpc
+      CidrBlock: !Ref ClientSubnet2Cidr
+      AvailabilityZone: 
+        Fn::If: 
+          - RegionIsUsEast1
+          - '{{resolve:ssm:azmap-use1-az6}}'
+          - Fn::If:
+            - RegionIsUsWest2
+            - '{{resolve:ssm:azmap-usw2-az3}}'
+            - Fn::If: 
+              - RegionIsCaCentral1
+              - '{{resolve:ssm:azmap-cac1-az2}}'
+              - Fn::If:
+                - RegionIsUsEast2
+                - us-east-2a
+                - us-west-1a
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-Clients-Subnet-2
+        - Key: AWS Starter-Kit-Name
+          Value: Windows-Migration
+# Internet Gateway and its vpc attachment
+  igw:
+    Type: AWS::EC2::InternetGateway
+    DependsOn: vpc
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-VPC-Internet-Gateway 
+        - Key: AWS Starter-Kit-Name
+          Value: Windows-Migration
+  igwAtt:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref vpc
+      InternetGatewayId: !Ref igw
+# Public route table. The next 3 resources create the Public route table, the default route, and the subnet association.
+  rtbPublic:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref vpc
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-routeTable-public
+        - Key: AWS Starter-Kit-Name
+          Value: Windows-Migration
+  publicRouteDefault:
+    Type: AWS::EC2::Route
+    DependsOn: igwAtt
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0    
+      RouteTableId: !Ref rtbPublic
+      GatewayId: !Ref igw
+  subnetRtbAssocPublic1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref subnetPublic1
+      RouteTableId: !Ref rtbPublic
+#Elastic IP for NAT Gateway, and NAT gateway.
+  eip1:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-elasticIP1
+        - Key: AWS Starter-Kit-Name
+          Value: Windows-Migration
+  natGateway1:
+    Type: AWS::EC2::NatGateway
+    Properties: 
+      AllocationId: !GetAtt eip1.AllocationId
+      SubnetId: !Ref subnetPublic1
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-Public-Subnet-1-Nat-Gateway
+        - Key: AWS Starter-Kit-Name
+          Value: Windows-Migration
+# Private Subnet 1 route table and association.
+  rtbPrivate1:
+    Type: AWS::EC2::RouteTable
+    Properties: 
+      VpcId: !Ref vpc
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-routeTable-private1
+        - Key: AWS Starter-Kit-Name
+          Value: Windows-Migration
+  subnetRtbAssocPrivate1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref subnetPrivate1
+      RouteTableId: !Ref rtbPrivate1
+# Private Subnet 2 route table and association.
+  rtbPrivate2:
+    Type: AWS::EC2::RouteTable
+    Properties: 
+      VpcId: !Ref vpc
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-routeTable-private2
+        - Key: AWS Starter-Kit-Name
+          Value: Windows-Migration
+  subnetRtbAssocPrivate2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref subnetPrivate2
+      RouteTableId: !Ref rtbPrivate2
+# Private Subnet 3 route table and association.
+  rtbPrivate3:
+    Type: AWS::EC2::RouteTable
+    Properties: 
+      VpcId: !Ref vpc
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-routeTable-private3
+        - Key: AWS Starter-Kit-Name
+          Value: Windows-Migration
+  subnetRtbAssocPrivate3:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref subnetPrivate3
+      RouteTableId: !Ref rtbPrivate3
+# Private Subnet 4 route table and association.
+  rtbPrivate4:
+    Type: AWS::EC2::RouteTable
+    Properties: 
+      VpcId: !Ref vpc
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-routeTable-private4
+        - Key: AWS Starter-Kit-Name
+          Value: Windows-Migration
+  subnetRtbAssocPrivate4:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref subnetPrivate4
+      RouteTableId: !Ref rtbPrivate4
+# S3 VPC endpoint. Although there are no S3 buckets created in this kit, this is part of any well-architected VPC and costs nothing.
+  s3VpcEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      RouteTableIds:
+        - !Ref rtbPrivate1
+        - !Ref rtbPrivate2
+        - !Ref rtbPrivate3
+        - !Ref rtbPrivate4
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.s3
+      VpcId: !Ref vpc
+# Default routes for the Private Subnets.
+  private1RouteDefault:
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      RouteTableId: !Ref rtbPrivate1
+      NatGatewayId: !Ref natGateway1
+  private2RouteDefault:
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      RouteTableId: !Ref rtbPrivate2
+      NatGatewayId: !Ref natGateway1
+  private3RouteDefault:
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      RouteTableId: !Ref rtbPrivate3
+      NatGatewayId: !Ref natGateway1
+  private4RouteDefault:
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      RouteTableId: !Ref rtbPrivate4
+      NatGatewayId: !Ref natGateway1
+# Customer Gateway for the Site to Site VPN Connection. 
+  customerGateway: 
+    Type: AWS::EC2::CustomerGateway
+    Properties: 
+      Type: ipsec.1
+      BgpAsn: 65501
+      IpAddress: !Ref OnPremGatewayPublicIp
+      Tags: 
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-customer-gateway
+        - Key: AWS Starter-Kit-Name
+          Value: Windows-Migration
+# Virtual Private Gateway for the Site to Site VPN Connection.
+  theVpnGateway: 
+   Type: AWS::EC2::VPNGateway
+   Properties: 
+      Type: ipsec.1
+      AmazonSideAsn: 64512
+      Tags: 
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-virtual-private-gateway
+        - Key: AWS Starter-Kit-Name
+          Value: Windows-Migration
+# Attachment which attaches VP Gateway to VPC.
+  vpnGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: 
+        Ref: vpc
+      VpnGatewayId:
+        Ref: theVpnGateway
+# Site to Site VPN Connection
+  theVpnConnection: 
+    Type: AWS::EC2::VPNConnection
+    Properties: 
+      Type: ipsec.1
+      StaticRoutesOnly: true
+      CustomerGatewayId: !Ref customerGateway
+      VpnGatewayId: !Ref theVpnGateway
+# VPN Route to customer prem
+  vpnRouteToPrem:
+    Type: AWS::EC2::VPNConnectionRoute
+    Properties: 
+      DestinationCidrBlock: !Ref OnPremCidr
+      VpnConnectionId: !Ref theVpnConnection
+# Routes to prem for each subnet route table
+  private1RouteToPrem:
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: !Ref OnPremCidr
+      RouteTableId: !Ref rtbPrivate1
+      GatewayId: !Ref theVpnGateway
+  private2RouteToPrem:
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: !Ref OnPremCidr
+      RouteTableId: !Ref rtbPrivate2
+      GatewayId: !Ref theVpnGateway
+  private3RouteToPrem:
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: !Ref OnPremCidr
+      RouteTableId: !Ref rtbPrivate3
+      GatewayId: !Ref theVpnGateway
+  private4RouteToPrem:
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: !Ref OnPremCidr
+      RouteTableId: !Ref rtbPrivate4
+      GatewayId: !Ref theVpnGateway
+# Launch template. The launch template only ensures that IMDSv2 is enforced with no other settings.
+  ec2LaunchTemplate: 
+    Type: AWS::EC2::LaunchTemplate
+    Properties: 
+      LaunchTemplateName: !Sub ec2-launch-template-for-${AWS::StackName}
+      LaunchTemplateData: 
+        MetadataOptions:
+          HttpTokens: required
+##### NETWORK ACLs START HERE #####
+# Notes on NACL Rules - while there is rule duplication, the NALCs and rules are constructed so that individual NACLs can be detached / attached
+# for troubleshooting purposes without having to manipulate individual rules.
+  PublicSubnetsNacl:
+    Type: AWS::EC2::NetworkAcl
+    Properties:
+      VpcId: !Ref vpc
+      Tags: 
+        - Key: Name 
+          Value: public-subnets-NACL 
+        - Key: AWS Starter-Kit-Name
+          Value: Windows-Migration
+  NaclRuleDenyPublicInboundSsh:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref PublicSubnetsNacl
+      RuleNumber: 10
+      Protocol: 6
+      RuleAction: deny
+      CidrBlock: 0.0.0.0/0
+      PortRange:
+        From: 22
+        To: 22
+  NaclRuleDenyPublicInboundRdp:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref PublicSubnetsNacl
+      RuleNumber: 11
+      Protocol: 6
+      RuleAction: deny
+      CidrBlock: 0.0.0.0/0
+      PortRange:
+        From: 3389 
+        To: 3389 
+  NaclRuleAllowPubliInboundTcpFromPrivate1:
+    Metadata: 
+      cfn_nag: 
+        rules_to_suppress: 
+          - id: W72
+            reason: "Rules are constructed for easy troubleshooting and explanation, no overlap issue."
+          - id: W67
+            reason: "These are NACLs which allow traffic to the internet via the NAT Gateway"
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref PublicSubnetsNacl
+      RuleNumber: 100
+      Protocol: 6
+      RuleAction: allow
+      CidrBlock: !Ref DcSubnet1Cidr
+      PortRange:
+        From: 0
+        To: 65535
+  NaclRuleAllowPublicInboundUdpFromPrivate1:
+    Metadata: 
+      cfn_nag: 
+        rules_to_suppress: 
+          - id: W72
+            reason: "Rules are constructed for easy troubleshooting and explanation, no overlap issue."
+          - id: W67
+            reason: "These are NACLs which allow traffic to the internet via the NAT Gateway"
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref PublicSubnetsNacl
+      RuleNumber: 101
+      Protocol: 17
+      RuleAction: allow
+      CidrBlock: !Ref DcSubnet1Cidr
+      PortRange:
+        From: 0
+        To: 65535
+  NaclRuleAllowPublicInboundTcpFromPrivate2:
+    Metadata: 
+      cfn_nag: 
+        rules_to_suppress: 
+          - id: W72
+            reason: "Rules are constructed for easy troubleshooting and explanation, no overlap issue."
+          - id: W67
+            reason: "These are NACLs which allow traffic to the internet via the NAT Gateway"
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref PublicSubnetsNacl
+      RuleNumber: 102
+      Protocol: 6
+      RuleAction: allow
+      CidrBlock: !Ref DcSubnet2Cidr
+      PortRange:
+        From: 0
+        To: 65535
+  NaclRuleAllowPublicInboundUdpFromPrivate2:
+    Metadata: 
+      cfn_nag: 
+        rules_to_suppress: 
+          - id: W72
+            reason: "Rules are constructed for easy troubleshooting and explanation, no overlap issue."
+          - id: W67
+            reason: "These are NACLs which allow traffic to the internet via the NAT Gateway"
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref PublicSubnetsNacl
+      RuleNumber: 103
+      Protocol: 17
+      RuleAction: allow
+      CidrBlock: !Ref DcSubnet2Cidr
+      PortRange:
+        From: 0
+        To: 65535
+  NaclRuleAllowPublicInboundTcpFromPrivate3:
+    Metadata: 
+      cfn_nag: 
+        rules_to_suppress: 
+          - id: W72
+            reason: "Rules are constructed for easy troubleshooting and explanation, no overlap issue."
+          - id: W67
+            reason: "These are NACLs which allow traffic to the internet via the NAT Gateway"
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref PublicSubnetsNacl
+      RuleNumber: 104
+      Protocol: 6
+      RuleAction: allow
+      CidrBlock: !Ref ClientSubnet1Cidr
+      PortRange:
+        From: 0
+        To: 65535
+  NaclRuleAllowPublicInboundUdpFromPrivate3:
+    Metadata: 
+      cfn_nag: 
+        rules_to_suppress: 
+          - id: W72
+            reason: "Rules are constructed for easy troubleshooting and explanation, no overlap issue."
+          - id: W67
+            reason: "These are NACLs which allow traffic to the internet via the NAT Gateway"
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref PublicSubnetsNacl
+      RuleNumber: 105
+      Protocol: 17
+      RuleAction: allow
+      CidrBlock: !Ref ClientSubnet1Cidr
+      PortRange:
+        From: 0
+        To: 65535
+  NaclRuleAllowPublicInboundTcpFromPrivate4:
+    Metadata: 
+      cfn_nag: 
+        rules_to_suppress: 
+          - id: W72
+            reason: "Rules are constructed for easy troubleshooting and explanation, no overlap issue."
+          - id: W67
+            reason: "These are NACLs which allow traffic to the internet via the NAT Gateway"
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref PublicSubnetsNacl
+      RuleNumber: 106
+      Protocol: 6
+      RuleAction: allow
+      CidrBlock: !Ref ClientSubnet2Cidr
+      PortRange:
+        From: 0
+        To: 65535
+  NaclRuleAllowPublicInboundUdpFromPrivate4:
+    Metadata: 
+      cfn_nag: 
+        rules_to_suppress: 
+          - id: W72
+            reason: "Rules are constructed for easy troubleshooting and explanation, no overlap issue."
+          - id: W67
+            reason: "These are NACLs which allow traffic to the internet via the NAT Gateway"
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref PublicSubnetsNacl
+      RuleNumber: 107
+      Protocol: 17
+      RuleAction: allow
+      CidrBlock: !Ref ClientSubnet2Cidr
+      PortRange:
+        From: 0
+        To: 65535
+  NaclRulePublicInboundFromInternetTcp:
+    Metadata: 
+      cfn_nag: 
+        rules_to_suppress: 
+          - id: W72
+            reason: "Rules are constructed for easy troubleshooting and explanation, no overlap issue."
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref PublicSubnetsNacl
+      RuleNumber: 200
+      Protocol: 6
+      RuleAction: allow
+      CidrBlock: 0.0.0.0/0
+      PortRange:
+        From: 1024
+        To: 65535 
+  NaclRulePublicInboundFromInternetUdp:
+    Metadata: 
+      cfn_nag: 
+        rules_to_suppress: 
+          - id: W72
+            reason: "Rules are constructed for easy troubleshooting and explanation, no overlap issue."
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref PublicSubnetsNacl
+      RuleNumber: 201
+      Protocol: 17
+      RuleAction: allow
+      CidrBlock: 0.0.0.0/0
+      PortRange:
+        From: 1024
+        To: 65535 
+  NaclRulePublicOutboundRuleTcpToPrivate1:
+    Metadata: 
+      cfn_nag: 
+        rules_to_suppress: 
+          - id: W72
+            reason: "Rules are constructed for easy troubleshooting and explanation, no overlap issue."
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref PublicSubnetsNacl
+      RuleNumber: 100
+      Protocol: 6
+      Egress: true
+      RuleAction: allow 
+      CidrBlock: !Ref DcSubnet1Cidr
+      PortRange:
+        From: 1024
+        To: 65535 
+  NaclRulePublicOutboundRuleUdpToPrivate1:
+    Metadata: 
+      cfn_nag: 
+        rules_to_suppress: 
+          - id: W72
+            reason: "Rules are constructed for easy troubleshooting and explanation"
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref PublicSubnetsNacl
+      RuleNumber: 101
+      Protocol: 17
+      Egress: true
+      RuleAction: allow
+      CidrBlock: !Ref DcSubnet1Cidr
+      PortRange:
+        From: 1024
+        To: 65535 
+  NaclRulePublicOutboundRuleTcpToPrivate2:
+    Metadata: 
+      cfn_nag: 
+        rules_to_suppress: 
+          - id: W72
+            reason: "Rules are constructed for easy troubleshooting and explanation"
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref PublicSubnetsNacl
+      RuleNumber: 102
+      Protocol: 6
+      Egress: true
+      RuleAction: allow 
+      CidrBlock: !Ref DcSubnet2Cidr
+      PortRange:
+        From: 1024
+        To: 65535 
+  NaclRulePublicOutboundRuleUdpToPrivate2:
+    Metadata: 
+      cfn_nag: 
+        rules_to_suppress: 
+          - id: W72
+            reason: "Rules are constructed for easy troubleshooting and explanation"
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref PublicSubnetsNacl
+      RuleNumber: 103
+      Protocol: 17
+      Egress: true
+      RuleAction: allow
+      CidrBlock: !Ref DcSubnet2Cidr
+      PortRange:
+        From: 1024
+        To: 65535 
+  NaclRulePublicOutboundRuleTcpToPrivate3:
+    Metadata: 
+      cfn_nag: 
+        rules_to_suppress: 
+          - id: W72
+            reason: "Rules are constructed for easy troubleshooting and explanation"
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref PublicSubnetsNacl
+      RuleNumber: 104
+      Protocol: 6
+      Egress: true
+      RuleAction: allow 
+      CidrBlock: !Ref ClientSubnet1Cidr
+      PortRange:
+        From: 1024
+        To: 65535 
+  NaclRulePublicOutboundRuleUdpToPrivate3:
+    Metadata: 
+      cfn_nag: 
+        rules_to_suppress: 
+          - id: W72
+            reason: "Rules are constructed for easy troubleshooting and explanation"
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref PublicSubnetsNacl
+      RuleNumber: 105
+      Protocol: 17
+      Egress: true
+      RuleAction: allow
+      CidrBlock: !Ref ClientSubnet1Cidr
+      PortRange:
+        From: 1024
+        To: 65535 
+  NaclRulePublicOutboundRuleTcpToPrivate4:
+    Metadata: 
+      cfn_nag: 
+        rules_to_suppress: 
+          - id: W72
+            reason: "Rules are constructed for easy troubleshooting and explanation"
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref PublicSubnetsNacl
+      RuleNumber: 106
+      Protocol: 6
+      Egress: true
+      RuleAction: allow 
+      CidrBlock: !Ref ClientSubnet2Cidr
+      PortRange:
+        From: 1024
+        To: 65535 
+  NaclRulePublicOutboundRuleUdpToPrivate4:
+    Metadata: 
+      cfn_nag: 
+        rules_to_suppress: 
+          - id: W72
+            reason: "Rules are constructed for easy troubleshooting and explanation"
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref PublicSubnetsNacl
+      RuleNumber: 107
+      Protocol: 17
+      Egress: true
+      RuleAction: allow
+      CidrBlock: !Ref ClientSubnet2Cidr
+      PortRange:
+        From: 1024
+        To: 65535 
+  NaclRulePublicOutboundRuleTcpToInternet:
+    Metadata: 
+      cfn_nag: 
+        rules_to_suppress: 
+          - id: W72
+            reason: "Rules are constructed for easy troubleshooting and explanation, no overlap issue."
+          - id: W67
+            reason: "These are NACLs which allow traffic to the internet via the NAT Gateway"
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref PublicSubnetsNacl
+      RuleNumber: 200
+      Protocol: 6
+      Egress: true
+      RuleAction: allow 
+      CidrBlock: 0.0.0.0/0
+      PortRange:
+        From: 0 
+        To: 65535
+  NaclRulePublicOutboundRuleUdpToInternet:
+    Metadata: 
+      cfn_nag: 
+        rules_to_suppress: 
+          - id: W72
+            reason: "Rules are constructed for easy troubleshooting and explanation, no overlap issue."
+          - id: W67
+            reason: "These are NACLs which allow traffic to the internet via the NAT Gateway"
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref PublicSubnetsNacl
+      RuleNumber: 201
+      Protocol: 17
+      Egress: true
+      RuleAction: allow
+      CidrBlock: 0.0.0.0/0
+      PortRange:
+        From: 0 
+        To: 65535
+  SubnetPrivate1Nacl: 
+    Type: AWS::EC2::NetworkAcl
+    Properties:
+      VpcId: !Ref vpc
+      Tags: 
+        - Key: Name 
+          Value: subnet-private-1-NACL
+        - Key: AWS Starter-Kit-Name
+          Value: Windows-Migration
+  NaclRulePrivate1FromPrivate2:
+    Metadata: 
+      cfn_nag: 
+        rules_to_suppress: 
+          - id: W66
+            reason: "Internal to Internal Windows communication"
+          - id: W72
+            reason: "Rules are constructed for easy troubleshooting and explanation"
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref SubnetPrivate1Nacl
+      RuleNumber: 100
+      Protocol: -1
+      RuleAction: allow
+      CidrBlock: !Ref DcSubnet2Cidr
+  NaclRulePrivate1FromPrivate3:
+    Metadata: 
+      cfn_nag: 
+        rules_to_suppress: 
+          - id: W66
+            reason: "Internal to Internal Windows communication"
+          - id: W72
+            reason: "Rules are constructed for easy troubleshooting and explanation"
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref SubnetPrivate1Nacl
+      RuleNumber: 101
+      Protocol: -1
+      RuleAction: allow
+      CidrBlock: !Ref ClientSubnet1Cidr
+  NaclRulePrivate1FromPrivate4:
+    Metadata: 
+      cfn_nag: 
+        rules_to_suppress: 
+          - id: W66
+            reason: "Internal to Internal Windows communication"
+          - id: W72
+            reason: "Rules are constructed for easy troubleshooting and explanation"
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref SubnetPrivate1Nacl
+      RuleNumber: 102
+      Protocol: -1
+      RuleAction: allow
+      CidrBlock: !Ref ClientSubnet2Cidr
+  NaclRulePrivate1FromPrem:
+    Metadata: 
+      cfn_nag: 
+        rules_to_suppress: 
+          - id: W66
+            reason: "Internal to Internal Windows communication"
+          - id: W72
+            reason: "Rules are constructed for easy troubleshooting and explanation"
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref SubnetPrivate1Nacl
+      RuleNumber: 103
+      Protocol: -1
+      RuleAction: allow
+      CidrBlock: !Ref OnPremCidr
+  NaclRuleAllowPrivate1InboundEphemeralTcp:
+    Metadata: 
+      cfn_nag: 
+        rules_to_suppress: 
+          - id: W72
+            reason: "Rules are constructed for easy troubleshooting and explanation"
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref SubnetPrivate1Nacl
+      RuleNumber: 200
+      Protocol: 6
+      RuleAction: allow
+      CidrBlock: 0.0.0.0/0
+      PortRange:
+        From: 1024
+        To: 65535 
+  NaclRuleAllowPrivate1InboundEphemeralUdp:
+    Metadata: 
+      cfn_nag: 
+        rules_to_suppress: 
+          - id: W72
+            reason: "Rules are constructed for easy troubleshooting and explanation"
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref SubnetPrivate1Nacl
+      RuleNumber: 201
+      Protocol: 17
+      RuleAction: allow
+      CidrBlock: 0.0.0.0/0
+      PortRange:
+        From: 1024
+        To: 65535 
+  NaclRulePrivate1ToPrivate2:
+    Metadata: 
+      cfn_nag: 
+        rules_to_suppress: 
+          - id: W66
+            reason: "Internal to Internal Windows communication"
+          - id: W72
+            reason: "Rules are constructed for easy troubleshooting and explanation"
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref SubnetPrivate1Nacl
+      RuleNumber: 100
+      Protocol: -1
+      Egress: true
+      RuleAction: allow
+      CidrBlock: !Ref DcSubnet2Cidr
+  NaclRulePrivate1ToPrivate3:
+    Metadata: 
+      cfn_nag: 
+        rules_to_suppress: 
+          - id: W66
+            reason: "Internal to Internal Windows communication"
+          - id: W72
+            reason: "Rules are constructed for easy troubleshooting and explanation"
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref SubnetPrivate1Nacl
+      RuleNumber: 101
+      Protocol: -1
+      Egress: true
+      RuleAction: allow
+      CidrBlock: !Ref ClientSubnet1Cidr
+  NaclRulePrivate1ToPrivate4:
+    Metadata: 
+      cfn_nag: 
+        rules_to_suppress: 
+          - id: W66
+            reason: "Internal to Internal Windows communication"
+          - id: W72
+            reason: "Rules are constructed for easy troubleshooting and explanation"
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref SubnetPrivate1Nacl
+      RuleNumber: 102
+      Protocol: -1
+      Egress: true
+      RuleAction: allow
+      CidrBlock: !Ref ClientSubnet2Cidr
+  NaclRulePrivate1ToPrem:
+    Metadata: 
+      cfn_nag: 
+        rules_to_suppress:
+          - id: W66
+            reason: "Internal to Internal Windows communication"
+          - id: W72
+            reason: "Rules are constructed for easy troubleshooting and explanation"
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref SubnetPrivate1Nacl
+      RuleNumber: 103
+      Protocol: -1
+      Egress: true
+      RuleAction: allow
+      CidrBlock: !Ref OnPremCidr
+  NaclRulePrivate1toInternetTcp: 
+    Metadata: 
+      cfn_nag: 
+        rules_to_suppress: 
+          - id: W72
+            reason: "Rules are constructed for easy troubleshooting and explanation, no overlap issue."
+          - id: W67
+            reason: "These are NACLs which allow traffic to the internet via the NAT Gateway"
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref SubnetPrivate1Nacl
+      RuleNumber: 200
+      Protocol: 6
+      Egress: true
+      RuleAction: allow
+      CidrBlock: 0.0.0.0/0 
+      PortRange:
+        From: 0
+        To: 65535
+  NaclRulePrivate1toInternetUdp: 
+    Metadata: 
+      cfn_nag: 
+        rules_to_suppress: 
+          - id: W72
+            reason: "Rules are constructed for easy troubleshooting and explanation, no overlap issue."
+          - id: W67
+            reason: "These are NACLs which allow traffic to the internet via the NAT Gateway"
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref SubnetPrivate1Nacl
+      RuleNumber: 201
+      Protocol: 17
+      Egress: true
+      RuleAction: allow
+      CidrBlock: 0.0.0.0/0 
+      PortRange:
+        From: 0
+        To: 65535
+  SubnetPrivate2Nacl: 
+    Type: AWS::EC2::NetworkAcl
+    Properties:
+      VpcId: !Ref vpc
+      Tags: 
+        - Key: Name 
+          Value: subnet-private-2-NACL
+        - Key: AWS Starter-Kit-Name
+          Value: Windows-Migration
+  NaclRulePrivate2FromPrivate1:
+    Metadata: 
+      cfn_nag: 
+        rules_to_suppress: 
+          - id: W66
+            reason: "Internal to Internal Windows communication"
+          - id: W72
+            reason: "Rules are constructed for easy troubleshooting and explanation"
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref SubnetPrivate2Nacl
+      RuleNumber: 100
+      Protocol: -1
+      RuleAction: allow
+      CidrBlock: !Ref DcSubnet1Cidr
+  NaclRulePrivate2FromPrivate3:
+    Metadata: 
+      cfn_nag: 
+        rules_to_suppress: 
+          - id: W66
+            reason: "Internal to Internal Windows communication"
+          - id: W72
+            reason: "Rules are constructed for easy troubleshooting and explanation"
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref SubnetPrivate2Nacl
+      RuleNumber: 101
+      Protocol: -1
+      RuleAction: allow
+      CidrBlock: !Ref ClientSubnet1Cidr
+  NaclRulePrivate2FromPrivate4:
+    Metadata: 
+      cfn_nag: 
+        rules_to_suppress: 
+          - id: W66
+            reason: "Internal to Internal Windows communication"
+          - id: W72
+            reason: "Rules are constructed for easy troubleshooting and explanation"
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref SubnetPrivate2Nacl
+      RuleNumber: 102
+      Protocol: -1
+      RuleAction: allow
+      CidrBlock: !Ref ClientSubnet2Cidr
+  NaclRulePrivate2FromPrem:
+    Metadata: 
+      cfn_nag: 
+        rules_to_suppress: 
+          - id: W66
+            reason: "Internal to Internal Windows communication"
+          - id: W72
+            reason: "Rules are constructed for easy troubleshooting and explanation"
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref SubnetPrivate2Nacl
+      RuleNumber: 103
+      Protocol: -1
+      RuleAction: allow
+      CidrBlock: !Ref OnPremCidr
+  NaclRuleAllowPrivate2InboundEphemeralTcp: 
+    Metadata: 
+      cfn_nag: 
+        rules_to_suppress: 
+          - id: W72
+            reason: "Rules are constructed for easy troubleshooting and explanation"
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref SubnetPrivate2Nacl
+      RuleNumber: 200
+      Protocol: 6
+      RuleAction: allow
+      CidrBlock: 0.0.0.0/0
+      PortRange:
+        From: 1024
+        To: 65535 
+  NaclRuleAllowPrivate2InboundEphemeralUdp:
+    Metadata: 
+      cfn_nag: 
+        rules_to_suppress: 
+          - id: W72
+            reason: "Rules are constructed for easy troubleshooting and explanation"
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref SubnetPrivate2Nacl
+      RuleNumber: 201
+      Protocol: 17
+      RuleAction: allow
+      CidrBlock: 0.0.0.0/0
+      PortRange:
+        From: 1024
+        To: 65535 
+  NaclRulePrivate2ToPrivate1:
+    Metadata: 
+      cfn_nag: 
+        rules_to_suppress: 
+          - id: W66
+            reason: "Internal to Internal Windows communication"
+          - id: W72
+            reason: "Rules are constructed for easy troubleshooting and explanation"
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref SubnetPrivate2Nacl
+      RuleNumber: 100
+      Protocol: -1
+      Egress: true
+      RuleAction: allow
+      CidrBlock: !Ref DcSubnet1Cidr
+  NaclRulePrivate2ToPrivate3:
+    Metadata: 
+      cfn_nag: 
+        rules_to_suppress: 
+          - id: W66
+            reason: "Internal to Internal Windows communication"
+          - id: W72
+            reason: "Rules are constructed for easy troubleshooting and explanation"
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref SubnetPrivate2Nacl
+      RuleNumber: 101
+      Protocol: -1
+      Egress: true
+      RuleAction: allow
+      CidrBlock: !Ref ClientSubnet1Cidr
+  NaclRulePrivate2ToPrivate4:
+    Metadata: 
+      cfn_nag: 
+        rules_to_suppress: 
+          - id: W66
+            reason: "Internal to Internal Windows communication"
+          - id: W72
+            reason: "Rules are constructed for easy troubleshooting and explanation"
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref SubnetPrivate2Nacl
+      RuleNumber: 102
+      Protocol: -1
+      Egress: true
+      RuleAction: allow
+      CidrBlock: !Ref ClientSubnet2Cidr
+  NaclRulePrivate2ToPrem:
+    Metadata: 
+      cfn_nag: 
+        rules_to_suppress: 
+          - id: W66
+            reason: "Internal to Internal Windows communication"
+          - id: W72
+            reason: "Rules are constructed for easy troubleshooting and explanation"
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref SubnetPrivate2Nacl
+      RuleNumber: 103
+      Protocol: -1
+      Egress: true
+      RuleAction: allow
+      CidrBlock: !Ref OnPremCidr
+  NaclRulePrivate2toInternetTcp: 
+    Metadata: 
+      cfn_nag: 
+        rules_to_suppress: 
+          - id: W72
+            reason: "Rules are constructed for easy troubleshooting and explanation, no overlap issue."
+          - id: W67
+            reason: "These are NACLs which allow traffic to the internet via the NAT Gateway"
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref SubnetPrivate2Nacl
+      RuleNumber: 200
+      Protocol: 6
+      Egress: true
+      RuleAction: allow
+      CidrBlock: 0.0.0.0/0 
+      PortRange:
+        From: 0
+        To: 65535
+  NaclRulePrivate2toInternetUdp: 
+    Metadata: 
+      cfn_nag: 
+        rules_to_suppress: 
+          - id: W72
+            reason: "Rules are constructed for easy troubleshooting and explanation, no overlap issue."
+          - id: W67
+            reason: "These are NACLs which allow traffic to the internet via the NAT Gateway"
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref SubnetPrivate2Nacl
+      RuleNumber: 201
+      Protocol: 17
+      Egress: true
+      RuleAction: allow
+      CidrBlock: 0.0.0.0/0 
+      PortRange:
+        From: 0
+        To: 65535
+  SubnetPrivate3Nacl: 
+    Type: AWS::EC2::NetworkAcl
+    Properties:
+      VpcId: !Ref vpc
+      Tags: 
+        - Key: Name 
+          Value: subnet-private-3-NACL
+        - Key: AWS Starter-Kit-Name
+          Value: Windows-Migration
+  NaclRulePrivate3FromPrivate1:
+    Metadata: 
+      cfn_nag: 
+        rules_to_suppress: 
+          - id: W66
+            reason: "Internal to Internal Windows communication"
+          - id: W72
+            reason: "Rules are constructed for easy troubleshooting and explanation"
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref SubnetPrivate3Nacl
+      RuleNumber: 100
+      Protocol: -1
+      RuleAction: allow
+      CidrBlock: !Ref DcSubnet1Cidr
+  NaclRulePrivate3FromPrivate2:
+    Metadata: 
+      cfn_nag: 
+        rules_to_suppress: 
+          - id: W66
+            reason: "Internal to Internal Windows communication"
+          - id: W72
+            reason: "Rules are constructed for easy troubleshooting and explanation"
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref SubnetPrivate3Nacl
+      RuleNumber: 101
+      Protocol: -1
+      RuleAction: allow
+      CidrBlock: !Ref DcSubnet2Cidr
+  NaclRulePrivate3FromPrivate4:
+    Metadata: 
+      cfn_nag: 
+        rules_to_suppress:
+          - id: W66
+            reason: "Internal to Internal Windows communication"
+          - id: W72
+            reason: "Rules are constructed for easy troubleshooting and explanation"
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref SubnetPrivate3Nacl
+      RuleNumber: 102
+      Protocol: -1
+      RuleAction: allow
+      CidrBlock: !Ref ClientSubnet2Cidr
+  NaclRulePrivate3FromPrem:
+    Metadata: 
+      cfn_nag: 
+        rules_to_suppress: 
+          - id: W66
+            reason: "Internal to Internal Windows communication"
+          - id: W72
+            reason: "Rules are constructed for easy troubleshooting and explanation"
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref SubnetPrivate3Nacl
+      RuleNumber: 103
+      Protocol: -1
+      RuleAction: allow
+      CidrBlock: !Ref OnPremCidr
+  NaclRuleAllowPrivate3InboundEphemeralTcp:
+    Metadata: 
+      cfn_nag: 
+        rules_to_suppress: 
+          - id: W72
+            reason: "Rules are constructed for easy troubleshooting and explanation"
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref SubnetPrivate3Nacl
+      RuleNumber: 200
+      Protocol: 6
+      RuleAction: allow
+      CidrBlock: 0.0.0.0/0
+      PortRange:
+        From: 1024
+        To: 65535 
+  NaclRuleAllowPrivate3InboundEphemeralUdp:
+    Metadata: 
+      cfn_nag: 
+        rules_to_suppress: 
+          - id: W72
+            reason: "Rules are constructed for easy troubleshooting and explanation"
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref SubnetPrivate3Nacl
+      RuleNumber: 201
+      Protocol: 17
+      RuleAction: allow
+      CidrBlock: 0.0.0.0/0
+      PortRange:
+        From: 1024
+        To: 65535 
+  NaclRulePrivate3ToPrivate1:
+    Metadata: 
+      cfn_nag: 
+        rules_to_suppress: 
+          - id: W66
+            reason: "Internal to Internal Windows communication"
+          - id: W72
+            reason: "Rules are constructed for easy troubleshooting and explanation"
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref SubnetPrivate3Nacl
+      RuleNumber: 100
+      Protocol: -1
+      Egress: true
+      RuleAction: allow
+      CidrBlock: !Ref DcSubnet1Cidr
+  NaclRulePrivate3ToPrivate2:
+    Metadata: 
+      cfn_nag: 
+        rules_to_suppress: 
+          - id: W66
+            reason: "Internal to Internal Windows communication"
+          - id: W72
+            reason: "Rules are constructed for easy troubleshooting and explanation"
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref SubnetPrivate3Nacl
+      RuleNumber: 101
+      Protocol: -1
+      Egress: true
+      RuleAction: allow
+      CidrBlock: !Ref DcSubnet2Cidr
+  NaclRulePrivate3ToPrivate4:
+    Metadata: 
+      cfn_nag: 
+        rules_to_suppress: 
+          - id: W66
+            reason: "Internal to Internal Windows communication"
+          - id: W72
+            reason: "Rules are constructed for easy troubleshooting and explanation"
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref SubnetPrivate3Nacl
+      RuleNumber: 102
+      Protocol: -1
+      Egress: true
+      RuleAction: allow
+      CidrBlock: !Ref ClientSubnet2Cidr
+  NaclRulePrivate3ToPrem:
+    Metadata: 
+      cfn_nag: 
+        rules_to_suppress: 
+          - id: W66
+            reason: "Internal to Internal Windows communication"
+          - id: W72
+            reason: "Rules are constructed for easy troubleshooting and explanation"
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref SubnetPrivate3Nacl
+      RuleNumber: 103
+      Protocol: -1
+      Egress: true
+      RuleAction: allow
+      CidrBlock: !Ref OnPremCidr
+  NaclRulePrivate3toInternetTcp: 
+    Metadata: 
+      cfn_nag: 
+        rules_to_suppress: 
+          - id: W72
+            reason: "Rules are constructed for easy troubleshooting and explanation, no overlap issue."
+          - id: W67
+            reason: "These are NACLs which allow traffic to the internet via the NAT Gateway"
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref SubnetPrivate3Nacl
+      RuleNumber: 200
+      Protocol: 6
+      Egress: true
+      RuleAction: allow
+      CidrBlock: 0.0.0.0/0 
+      PortRange:
+        From: 0
+        To: 65535
+  NaclRulePrivate3toInternetUdp: 
+    Metadata: 
+      cfn_nag: 
+        rules_to_suppress: 
+          - id: W72
+            reason: "Rules are constructed for easy troubleshooting and explanation, no overlap issue."
+          - id: W67
+            reason: "These are NACLs which allow traffic to the internet via the NAT Gateway"
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref SubnetPrivate3Nacl
+      RuleNumber: 201
+      Protocol: 17
+      Egress: true
+      RuleAction: allow
+      CidrBlock: 0.0.0.0/0
+      PortRange:
+        From: 0
+        To: 65535
+  SubnetPrivate4Nacl: 
+    Type: AWS::EC2::NetworkAcl
+    Properties:
+      VpcId: !Ref vpc
+      Tags: 
+        - Key: Name 
+          Value: subnet-private-4-NACL
+        - Key: AWS Starter-Kit-Name
+          Value: Windows-Migration
+  NaclRulePrivate4FromPrivate1:
+    Metadata: 
+      cfn_nag: 
+        rules_to_suppress: 
+          - id: W66
+            reason: "Internal to Internal Windows communication"
+          - id: W72
+            reason: "Rules are constructed for easy troubleshooting and explanation"
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref SubnetPrivate4Nacl
+      RuleNumber: 100
+      Protocol: -1
+      RuleAction: allow
+      CidrBlock: !Ref DcSubnet1Cidr
+  NaclRulePrivate4FromPrivate2:
+    Metadata: 
+      cfn_nag: 
+        rules_to_suppress: 
+          - id: W66
+            reason: "Internal to Internal Windows communication"
+          - id: W72
+            reason: "Rules are constructed for easy troubleshooting and explanation"
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref SubnetPrivate4Nacl
+      RuleNumber: 101
+      Protocol: -1
+      RuleAction: allow
+      CidrBlock: !Ref DcSubnet2Cidr
+  NaclRulePrivate4FromPrivate3:
+    Metadata: 
+      cfn_nag: 
+        rules_to_suppress: 
+          - id: W66
+            reason: "Internal to Internal Windows communication"
+          - id: W72
+            reason: "Rules are constructed for easy troubleshooting and explanation"
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref SubnetPrivate4Nacl
+      RuleNumber: 102
+      Protocol: -1
+      RuleAction: allow
+      CidrBlock: !Ref ClientSubnet1Cidr
+  NaclRulePrivate4FromPrem:
+    Metadata: 
+      cfn_nag: 
+        rules_to_suppress: 
+          - id: W66
+            reason: "Internal to Internal Windows communication"
+          - id: W72
+            reason: "Rules are constructed for easy troubleshooting and explanation"
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref SubnetPrivate4Nacl
+      RuleNumber: 103
+      Protocol: -1
+      RuleAction: allow
+      CidrBlock: !Ref OnPremCidr
+  NaclRuleAllowPrivate4InboundEphemeralTcp:
+    Metadata: 
+      cfn_nag: 
+        rules_to_suppress: 
+          - id: W72
+            reason: "Rules are constructed for easy troubleshooting and explanation"
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref SubnetPrivate4Nacl
+      RuleNumber: 200
+      Protocol: 6
+      RuleAction: allow
+      CidrBlock: 0.0.0.0/0
+      PortRange:
+        From: 1024
+        To: 65535 
+  NaclRuleAllowPrivate4InboundEphemeralUdp:
+    Metadata: 
+      cfn_nag: 
+        rules_to_suppress: 
+          - id: W72
+            reason: "Rules are constructed for easy troubleshooting and explanation"
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref SubnetPrivate4Nacl
+      RuleNumber: 201
+      Protocol: 17
+      RuleAction: allow
+      CidrBlock: 0.0.0.0/0
+      PortRange:
+        From: 1024
+        To: 65535 
+  NaclRulePrivate4ToPrivate1:
+    Metadata: 
+      cfn_nag: 
+        rules_to_suppress: 
+          - id: W66
+            reason: "Internal to Internal Windows communication"
+          - id: W72
+            reason: "Rules are constructed for easy troubleshooting and explanation"
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref SubnetPrivate4Nacl
+      RuleNumber: 100
+      Protocol: -1
+      Egress: true
+      RuleAction: allow
+      CidrBlock: !Ref DcSubnet1Cidr
+  NaclRulePrivate4ToPrivate2:
+    Metadata: 
+      cfn_nag: 
+        rules_to_suppress: 
+          - id: W66
+            reason: "Internal to Internal Windows communication"
+          - id: W72
+            reason: "Rules are constructed for easy troubleshooting and explanation"
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref SubnetPrivate4Nacl
+      RuleNumber: 101
+      Protocol: -1
+      Egress: true
+      RuleAction: allow
+      CidrBlock: !Ref DcSubnet2Cidr
+  NaclRulePrivate4ToPrivate3:
+    Metadata: 
+      cfn_nag: 
+        rules_to_suppress: 
+          - id: W66
+            reason: "Internal to Internal Windows communication"
+          - id: W72
+            reason: "Rules are constructed for easy troubleshooting and explanation"
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref SubnetPrivate4Nacl
+      RuleNumber: 102
+      Protocol: -1
+      Egress: true
+      RuleAction: allow
+      CidrBlock: !Ref ClientSubnet1Cidr
+  NaclRulePrivate4ToPrem:
+    Metadata: 
+      cfn_nag: 
+        rules_to_suppress: 
+          - id: W66
+            reason: "Internal to Internal Windows communication"
+          - id: W72
+            reason: "Rules are constructed for easy troubleshooting and explanation"
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref SubnetPrivate4Nacl
+      RuleNumber: 103
+      Protocol: -1
+      Egress: true
+      RuleAction: allow
+      CidrBlock: !Ref OnPremCidr
+  NaclRulePrivate4toInternetTcp: 
+    Metadata: 
+      cfn_nag: 
+        rules_to_suppress: 
+          - id: W72
+            reason: "Rules are constructed for easy troubleshooting and explanation, no overlap issue."
+          - id: W67
+            reason: "These are NACLs which allow traffic to the internet via the NAT Gateway"
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref SubnetPrivate4Nacl
+      RuleNumber: 200
+      Protocol: 6
+      Egress: true
+      RuleAction: allow
+      CidrBlock: 0.0.0.0/0 
+      PortRange:
+        From: 0
+        To: 65535
+  NaclRulePrivate4toInternetUdp: 
+    Metadata: 
+      cfn_nag: 
+        rules_to_suppress: 
+          - id: W72
+            reason: "Rules are constructed for easy troubleshooting and explanation, no overlap issue."
+          - id: W67
+            reason: "These are NACLs which allow traffic to the internet via the NAT Gateway"
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref SubnetPrivate4Nacl
+      RuleNumber: 201
+      Protocol: 17
+      Egress: true
+      RuleAction: allow
+      CidrBlock: 0.0.0.0/0
+      PortRange:
+        From: 0
+        To: 65535
+  SubnetPublic1NaclAssociation: 
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    Properties:
+      SubnetId: !Ref subnetPublic1
+      NetworkAclId: !Ref PublicSubnetsNacl
+  SubnetPrivate1NalcAssociation: 
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    Properties:
+      SubnetId: !Ref subnetPrivate1
+      NetworkAclId: !Ref SubnetPrivate1Nacl
+  SubnetPrivate2NaclAssociation: 
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    Properties:
+      SubnetId: !Ref subnetPrivate2
+      NetworkAclId: !Ref SubnetPrivate2Nacl
+  SubnetPrivate3NaclAssociation: 
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    Properties:
+      SubnetId: !Ref subnetPrivate3
+      NetworkAclId: !Ref SubnetPrivate3Nacl
+  SubnetPrivate4NaclAssociation: 
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    Properties:
+      SubnetId: !Ref subnetPrivate4
+      NetworkAclId: !Ref SubnetPrivate4Nacl 
+##### SECURITY GROUPS START HERE #####
+# Allows for communication between VPC DCs and the On Prem DC
+  vpcDcsFromPremDcSecurityGroup:
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W5
+            reason: "Required for Windows Servers to get Windows Updates"
+          # see https://aws.amazon.com/blogs/security/securely-extend-and-access-on-premises-active-directory-domain-controllers-in-aws/
+          - id: W27
+            reason: "Required for Windows AD Commmunication see above comment"
+          - id: W28
+            reason: "Resource will not be replaced in an update"
+            # see https://aws.amazon.com/blogs/security/securely-extend-and-access-on-premises-active-directory-domain-controllers-in-aws/
+          - id: W29
+            reason: "Required for Windows AD Commmunication see above comment"
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: VPC-DCs-from-prem-DC-SecurityGroup
+      GroupDescription: allows for domain controller to domain controller communication between prem DC and vpc DC, can be deleted after migration if the on premise DC is decommissioned
+      VpcId: !Ref vpc
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 53
+        ToPort: 53
+        CidrIp: !Sub ${OnPremDcIp}/32
+        Description: DNS
+      - IpProtocol: udp
+        FromPort: 53
+        ToPort: 53
+        CidrIp: !Sub ${OnPremDcIp}/32
+        Description: DNS
+      - IpProtocol: tcp
+        FromPort: 88
+        ToPort: 88
+        CidrIp: !Sub ${OnPremDcIp}/32
+        Description: Kerberos
+      - IpProtocol: udp
+        FromPort: 88
+        ToPort: 88
+        CidrIp: !Sub ${OnPremDcIp}/32
+        Description: Kerberos
+      - IpProtocol: udp
+        FromPort: 123
+        ToPort: 123
+        CidrIp: !Sub ${OnPremDcIp}/32
+        Description: Windows Time
+      - IpProtocol: tcp
+        FromPort: 135
+        ToPort: 135
+        CidrIp: !Sub ${OnPremDcIp}/32
+        Description: RPC-Endpoint Mapper
+      - IpProtocol: udp
+        FromPort: 137
+        ToPort: 137
+        CidrIp: !Sub ${OnPremDcIp}/32
+        Description: NetLogon-NETBIOS Name Resolution
+      - IpProtocol: udp
+        FromPort: 138
+        ToPort: 138
+        CidrIp: !Sub ${OnPremDcIp}/32
+        Description: DFSN-NetLogon-NetBIOS Datagram
+      - IpProtocol: tcp
+        FromPort: 139
+        ToPort: 139
+        CidrIp: !Sub ${OnPremDcIp}/32
+        Description: DFSN-NetLogon-NetBIOS Session Service
+      - IpProtocol: tcp
+        FromPort: 389
+        ToPort: 389
+        CidrIp: !Sub ${OnPremDcIp}/32
+        Description: LDAP
+      - IpProtocol: udp
+        FromPort: 389
+        ToPort: 389
+        CidrIp: !Sub ${OnPremDcIp}/32
+        Description: LDAP
+      - IpProtocol: tcp
+        FromPort: 445
+        ToPort: 445
+        CidrIp: !Sub ${OnPremDcIp}/32
+        Description: SMB-CIFS-SMB2-DFSN-LSARPC-NetLogonR-SamR-SrvSvc
+      - IpProtocol: udp
+        FromPort: 445
+        ToPort: 445
+        CidrIp: !Sub ${OnPremDcIp}/32
+        Description: SMB-CIFS-SMB2-DFSN-LSARPC-NetLogonR-SamR-SrvSvc
+      - IpProtocol: tcp
+        FromPort: 464
+        ToPort: 464
+        CidrIp: !Sub ${OnPremDcIp}/32
+        Description: Kerberos-Change-Set-Password
+      - IpProtocol: udp
+        FromPort: 464
+        ToPort: 464
+        CidrIp: !Sub ${OnPremDcIp}/32
+        Description: Kerberos-Change-Set-Password
+      - IpProtocol: tcp
+        FromPort: 636
+        ToPort: 636
+        CidrIp: !Sub ${OnPremDcIp}/32
+        Description: LDAP SSL
+      - IpProtocol: tcp
+        FromPort: 3268
+        ToPort: 3268
+        CidrIp: !Sub ${OnPremDcIp}/32
+        Description: LDAP Global Catalog
+      - IpProtocol: tcp
+        FromPort: 3269
+        ToPort: 3269
+        CidrIp: !Sub ${OnPremDcIp}/32
+        Description: LDAP Global Catalog SSL
+      - IpProtocol: tcp
+        FromPort: 3389
+        ToPort: 3389
+        CidrIp: !Sub ${OnPremDcIp}/32
+        Description: Remote Desktop
+      - IpProtocol: tcp
+        FromPort: 5722
+        ToPort: 5722
+        CidrIp: !Sub ${OnPremDcIp}/32
+        Description: RPC-DFSR for SYSVOL
+      - IpProtocol: tcp
+        FromPort: 9389
+        ToPort: 9389
+        CidrIp: !Sub ${OnPremDcIp}/32
+        Description: SOAP
+      - IpProtocol: tcp
+        FromPort: 49152
+        ToPort: 65535
+        CidrIp: !Sub ${OnPremDcIp}/32
+        Description: Dynamic Ports-RPC-DCOM-EPM-DRSUAPI-NetLogonR-SamR-FRS
+      - IpProtocol: udp
+        FromPort: 49152
+        ToPort: 65535
+        CidrIp: !Sub ${OnPremDcIp}/32
+        Description: Dynamic Ports-RPC-DCOM-EPM-DRSUAPI-NetLogonR-SamR-FRS 
+      SecurityGroupEgress:
+      - IpProtocol: tcp
+        FromPort: 0
+        ToPort: 65535
+        CidrIp: 0.0.0.0/0
+        Description: Outbound traffic
+      - IpProtocol: udp
+        FromPort: 0
+        ToPort: 65535
+        CidrIp: 0.0.0.0/0
+        Description: Outbound traffic 
+# Allows for communication between VPC DCs
+  vpcDcsFromVpcDcsSecurityGroup:
+    Metadata:
+      cfn_nag: 
+        rules_to_suppress: 
+          - id: W5
+            reason: "Required for Windows Servers to get Windows Updates"
+          # see https://aws.amazon.com/blogs/security/securely-extend-and-access-on-premises-active-directory-domain-controllers-in-aws/
+          - id: W27
+            reason: "Required for Windows AD Commmunication see above comment"
+          - id: W28
+            reason: "Resource will not be replaced in an update"    
+          # see https://aws.amazon.com/blogs/security/securely-extend-and-access-on-premises-active-directory-domain-controllers-in-aws/
+          - id: W29
+            reason: "Required for Windows AD Commmunication see above comment"
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: VPC-DCs-From-VPC-DCs-SecurityGroup
+      GroupDescription: allows for in-vpc domain controller to domain controller communication
+      VpcId: !Ref vpc
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 53
+        ToPort: 53
+        CidrIp: !Ref DcSubnet1Cidr
+        Description: DNS
+      - IpProtocol: udp
+        FromPort: 53
+        ToPort: 53
+        CidrIp: !Ref DcSubnet1Cidr
+        Description: DNS
+      - IpProtocol: tcp
+        FromPort: 88
+        ToPort: 88
+        CidrIp: !Ref DcSubnet1Cidr
+        Description: Kerberos
+      - IpProtocol: udp
+        FromPort: 88
+        ToPort: 88
+        CidrIp: !Ref DcSubnet1Cidr
+        Description: Kerberos
+      - IpProtocol: udp
+        FromPort: 123
+        ToPort: 123
+        CidrIp: !Ref DcSubnet1Cidr
+        Description: Windows Time
+      - IpProtocol: tcp
+        FromPort: 135
+        ToPort: 135
+        CidrIp: !Ref DcSubnet1Cidr
+        Description: RPC-Endpoint Mapper
+      - IpProtocol: udp
+        FromPort: 137
+        ToPort: 137
+        CidrIp: !Ref DcSubnet1Cidr
+        Description: NetLogon-NETBIOS Name Resolution
+      - IpProtocol: udp
+        FromPort: 138
+        ToPort: 138
+        CidrIp: !Ref DcSubnet1Cidr
+        Description: DFSN-NetLogon-NetBIOS Datagram
+      - IpProtocol: tcp
+        FromPort: 139
+        ToPort: 139
+        CidrIp: !Ref DcSubnet1Cidr
+        Description: DFSN-NetLogon-NetBIOS Session Service
+      - IpProtocol: tcp
+        FromPort: 389
+        ToPort: 389
+        CidrIp: !Ref DcSubnet1Cidr
+        Description: LDAP
+      - IpProtocol: udp
+        FromPort: 389
+        ToPort: 389
+        CidrIp: !Ref DcSubnet1Cidr
+        Description: LDAP
+      - IpProtocol: tcp
+        FromPort: 445
+        ToPort: 445
+        CidrIp: !Ref DcSubnet1Cidr
+        Description: SMB-CIFS-SMB2-DFSN-LSARPC-NetLogonR-SamR-SrvSvc
+      - IpProtocol: udp
+        FromPort: 445
+        ToPort: 445
+        CidrIp: !Ref DcSubnet1Cidr
+        Description: SMB-CIFS-SMB2-DFSN-LSARPC-NetLogonR-SamR-SrvSvc
+      - IpProtocol: tcp
+        FromPort: 464
+        ToPort: 464
+        CidrIp: !Ref DcSubnet1Cidr
+        Description: Kerberos-Change-Set-Password
+      - IpProtocol: udp
+        FromPort: 464
+        ToPort: 464
+        CidrIp: !Ref DcSubnet1Cidr
+        Description: Kerberos-Change-Set-Password
+      - IpProtocol: tcp
+        FromPort: 636
+        ToPort: 636
+        CidrIp: !Ref DcSubnet1Cidr
+        Description: LDAP SSL
+      - IpProtocol: tcp
+        FromPort: 3268
+        ToPort: 3268
+        CidrIp: !Ref DcSubnet1Cidr
+        Description: LDAP Global Catalog
+      - IpProtocol: tcp
+        FromPort: 3269
+        ToPort: 3269
+        CidrIp: !Ref DcSubnet1Cidr
+        Description: LDAP Global Catalog SSL
+      - IpProtocol: tcp
+        FromPort: 3389
+        ToPort: 3389
+        CidrIp: !Ref DcSubnet1Cidr
+        Description: Remote Desktop
+      - IpProtocol: tcp
+        FromPort: 5722
+        ToPort: 5722
+        CidrIp: !Ref DcSubnet1Cidr
+        Description: RPC-DFSR for SYSVOL
+      - IpProtocol: tcp
+        FromPort: 9389
+        ToPort: 9389
+        CidrIp: !Ref DcSubnet1Cidr
+        Description: SOAP
+      - IpProtocol: tcp
+        FromPort: 49152
+        ToPort: 65535
+        CidrIp: !Ref DcSubnet1Cidr
+        Description: Dynamic Ports-RPC-DCOM-EPM-DRSUAPI-NetLogonR-SamR-FRS
+      - IpProtocol: udp
+        FromPort: 49152
+        ToPort: 65535
+        CidrIp: !Ref DcSubnet1Cidr
+        Description: Dynamic Ports-RPC-DCOM-EPM-DRSUAPI-NetLogonR-SamR-FRS
+      - IpProtocol: tcp
+        FromPort: 53
+        ToPort: 53
+        CidrIp: !Ref DcSubnet2Cidr
+        Description: DNS
+      - IpProtocol: udp
+        FromPort: 53
+        ToPort: 53
+        CidrIp: !Ref DcSubnet2Cidr
+        Description: DNS
+      - IpProtocol: tcp
+        FromPort: 88
+        ToPort: 88
+        CidrIp: !Ref DcSubnet2Cidr
+        Description: Kerberos
+      - IpProtocol: udp
+        FromPort: 88
+        ToPort: 88
+        CidrIp: !Ref DcSubnet2Cidr
+        Description: Kerberos
+      - IpProtocol: udp
+        FromPort: 123
+        ToPort: 123
+        CidrIp: !Ref DcSubnet2Cidr
+        Description: Windows Time
+      - IpProtocol: tcp
+        FromPort: 135
+        ToPort: 135
+        CidrIp: !Ref DcSubnet2Cidr
+        Description: RPC-Endpoint Mapper
+      - IpProtocol: udp
+        FromPort: 137
+        ToPort: 137
+        CidrIp: !Ref DcSubnet2Cidr
+        Description: NetLogon-NETBIOS Name Resolution
+      - IpProtocol: udp
+        FromPort: 138
+        ToPort: 138
+        CidrIp: !Ref DcSubnet2Cidr
+        Description: DFSN-NetLogon-NetBIOS Datagram
+      - IpProtocol: tcp
+        FromPort: 139
+        ToPort: 139
+        CidrIp: !Ref DcSubnet2Cidr
+        Description: DFSN-NetLogon-NetBIOS Session Service
+      - IpProtocol: tcp
+        FromPort: 389
+        ToPort: 389
+        CidrIp: !Ref DcSubnet2Cidr
+        Description: LDAP
+      - IpProtocol: udp
+        FromPort: 389
+        ToPort: 389
+        CidrIp: !Ref DcSubnet2Cidr
+        Description: LDAP
+      - IpProtocol: tcp
+        FromPort: 445
+        ToPort: 445
+        CidrIp: !Ref DcSubnet2Cidr
+        Description: SMB-CIFS-SMB2-DFSN-LSARPC-NetLogonR-SamR-SrvSvc
+      - IpProtocol: udp
+        FromPort: 445
+        ToPort: 445
+        CidrIp: !Ref DcSubnet2Cidr
+        Description: SMB-CIFS-SMB2-DFSN-LSARPC-NetLogonR-SamR-SrvSvc
+      - IpProtocol: tcp
+        FromPort: 464
+        ToPort: 464
+        CidrIp: !Ref DcSubnet2Cidr
+        Description: Kerberos-Change-Set-Password
+      - IpProtocol: udp
+        FromPort: 464
+        ToPort: 464
+        CidrIp: !Ref DcSubnet2Cidr
+        Description: Kerberos-Change-Set-Password
+      - IpProtocol: tcp
+        FromPort: 636
+        ToPort: 636
+        CidrIp: !Ref DcSubnet2Cidr
+        Description: LDAP SSL
+      - IpProtocol: tcp
+        FromPort: 3268
+        ToPort: 3268
+        CidrIp: !Ref DcSubnet2Cidr
+        Description: LDAP Global Catalog
+      - IpProtocol: tcp
+        FromPort: 3269
+        ToPort: 3269
+        CidrIp: !Ref DcSubnet2Cidr
+        Description: LDAP Global Catalog SSL
+      - IpProtocol: tcp
+        FromPort: 3389
+        ToPort: 3389
+        CidrIp: !Ref DcSubnet2Cidr
+        Description: Remote Desktop
+      - IpProtocol: tcp
+        FromPort: 5722
+        ToPort: 5722
+        CidrIp: !Ref DcSubnet2Cidr
+        Description: RPC-DFSR for SYSVOL
+      - IpProtocol: tcp
+        FromPort: 9389
+        ToPort: 9389
+        CidrIp: !Ref DcSubnet2Cidr
+        Description: SOAP
+      - IpProtocol: tcp
+        FromPort: 49152
+        ToPort: 65535
+        CidrIp: !Ref DcSubnet2Cidr
+        Description: Dynamic Ports-RPC-DCOM-EPM-DRSUAPI-NetLogonR-SamR-FRS
+      - IpProtocol: udp
+        FromPort: 49152
+        ToPort: 65535
+        CidrIp: !Ref DcSubnet2Cidr
+        Description: Dynamic Ports-RPC-DCOM-EPM-DRSUAPI-NetLogonR-SamR-FRS
+      SecurityGroupEgress:
+      - IpProtocol: tcp
+        FromPort: 0
+        ToPort: 65535
+        CidrIp: 0.0.0.0/0
+        Description: Outbound traffic
+      - IpProtocol: udp
+        FromPort: 0
+        ToPort: 65535
+        CidrIp: 0.0.0.0/0
+        Description: Outbound traffic 
+# Allows communication between VPC DCs and the client subnets
+  vpcDcsFromWindowsClientsSecurityGroup:
+    Metadata:
+      cfn_nag: 
+        rules_to_suppress: 
+          - id: W5
+            reason: "Required for Windows Servers to get Windows Updates"
+          # see https://aws.amazon.com/blogs/security/securely-extend-and-access-on-premises-active-directory-domain-controllers-in-aws/
+          - id: W27
+            reason: "Required for Windows AD Commmunication see above comment"
+          - id: W28
+            reason: "Resource will not be replaced in an update"
+          # see https://aws.amazon.com/blogs/security/securely-extend-and-access-on-premises-active-directory-domain-controllers-in-aws/
+          - id: W29
+            reason: "Required for Windows AD Commmunication see above comment"
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: VPC-DCs-FromWindows-Clients-SecurityGroup
+      GroupDescription: allows for windows client workstations and member servers to domain controller communication
+      VpcId: !Ref vpc
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 53
+        ToPort: 53
+        CidrIp: !Ref OnPremCidr
+        Description: DNS
+      - IpProtocol: udp
+        FromPort: 53
+        ToPort: 53
+        CidrIp: !Ref OnPremCidr
+        Description: DNS
+      - IpProtocol: tcp
+        FromPort: 88
+        ToPort: 88
+        CidrIp: !Ref OnPremCidr
+        Description: Kerberos
+      - IpProtocol: udp
+        FromPort: 88
+        ToPort: 88
+        CidrIp: !Ref OnPremCidr
+        Description: Kerberos
+      - IpProtocol: udp
+        FromPort: 123
+        ToPort: 123
+        CidrIp: !Ref OnPremCidr
+        Description: Windows Time
+      - IpProtocol: tcp
+        FromPort: 135
+        ToPort: 135
+        CidrIp: !Ref OnPremCidr
+        Description: RPC-Endpoint Mapper
+      - IpProtocol: udp
+        FromPort: 137
+        ToPort: 137
+        CidrIp: !Ref OnPremCidr
+        Description: NetLogon-NETBIOS Name Resolution
+      - IpProtocol: udp
+        FromPort: 138
+        ToPort: 138
+        CidrIp: !Ref OnPremCidr
+        Description: DFSN-NetLogon-NetBIOS Datagram
+      - IpProtocol: tcp
+        FromPort: 389
+        ToPort: 389
+        CidrIp: !Ref OnPremCidr
+        Description: LDAP
+      - IpProtocol: udp
+        FromPort: 389
+        ToPort: 389
+        CidrIp: !Ref OnPremCidr
+        Description: LDAP
+      - IpProtocol: tcp
+        FromPort: 445
+        ToPort: 445
+        CidrIp: !Ref OnPremCidr
+        Description: SMB-CIFS-SMB2-DFSN-LSARPC-NetLogonR-SamR-SrvSvc
+      - IpProtocol: tcp
+        FromPort: 464
+        ToPort: 464
+        CidrIp: !Ref OnPremCidr
+        Description: Kerberos-Change-Set-Password
+      - IpProtocol: udp
+        FromPort: 464
+        ToPort: 464
+        CidrIp: !Ref OnPremCidr
+        Description: Kerberos-Change-Set-Password
+      - IpProtocol: tcp
+        FromPort: 636
+        ToPort: 636
+        CidrIp: !Ref OnPremCidr
+        Description: LDAP SSL
+      - IpProtocol: tcp
+        FromPort: 3268
+        ToPort: 3268
+        CidrIp: !Ref OnPremCidr
+        Description: LDAP Global Catalog
+      - IpProtocol: tcp
+        FromPort: 3269
+        ToPort: 3269
+        CidrIp: !Ref OnPremCidr
+        Description: LDAP Global Catalog SSL
+      - IpProtocol: tcp
+        FromPort: 3389
+        ToPort: 3389
+        CidrIp: !Ref OnPremCidr
+        Description: Remote Desktop
+      - IpProtocol: tcp
+        FromPort: 9389
+        ToPort: 9389
+        CidrIp: !Ref OnPremCidr
+        Description: AD DS Web Service
+      - IpProtocol: tcp
+        FromPort: 49152
+        ToPort: 65535
+        CidrIp: !Ref OnPremCidr
+        Description: Dynamic Ports-RPC-DCOM-EPM-DRSUAPI-NetLogonR-SamR-FRS
+      - IpProtocol: udp
+        FromPort: 49152
+        ToPort: 65535
+        CidrIp: !Ref OnPremCidr
+        Description: Dynamic Ports-RPC-DCOM-EPM-DRSUAPI-NetLogonR-SamR-FRS
+      - IpProtocol: tcp
+        FromPort: 53
+        ToPort: 53
+        CidrIp: !Ref ClientSubnet1Cidr
+        Description: DNS
+      - IpProtocol: udp
+        FromPort: 53
+        ToPort: 53
+        CidrIp: !Ref ClientSubnet1Cidr
+        Description: DNS
+      - IpProtocol: tcp
+        FromPort: 88
+        ToPort: 88
+        CidrIp: !Ref ClientSubnet1Cidr
+        Description: Kerberos
+      - IpProtocol: udp
+        FromPort: 88
+        ToPort: 88
+        CidrIp: !Ref ClientSubnet1Cidr
+        Description: Kerberos
+      - IpProtocol: udp
+        FromPort: 123
+        ToPort: 123
+        CidrIp: !Ref ClientSubnet1Cidr
+        Description: Windows Time
+      - IpProtocol: tcp
+        FromPort: 135
+        ToPort: 135
+        CidrIp: !Ref ClientSubnet1Cidr
+        Description: RPC-Endpoint Mapper
+      - IpProtocol: udp
+        FromPort: 137
+        ToPort: 137
+        CidrIp: !Ref ClientSubnet1Cidr
+        Description: NetLogon-NETBIOS Name Resolution
+      - IpProtocol: udp
+        FromPort: 138
+        ToPort: 138
+        CidrIp: !Ref ClientSubnet1Cidr
+        Description: DFSN-NetLogon-NetBIOS Datagram
+      - IpProtocol: tcp
+        FromPort: 389
+        ToPort: 389
+        CidrIp: !Ref ClientSubnet1Cidr
+        Description: LDAP
+      - IpProtocol: udp
+        FromPort: 389
+        ToPort: 389
+        CidrIp: !Ref ClientSubnet1Cidr
+        Description: LDAP
+      - IpProtocol: tcp
+        FromPort: 445
+        ToPort: 445
+        CidrIp: !Ref ClientSubnet1Cidr
+        Description: SMB-CIFS-SMB2-DFSN-LSARPC-NetLogonR-SamR-SrvSvc
+      - IpProtocol: tcp
+        FromPort: 464
+        ToPort: 464
+        CidrIp: !Ref ClientSubnet1Cidr
+        Description: Kerberos-Change-Set-Password
+      - IpProtocol: udp
+        FromPort: 464
+        ToPort: 464
+        CidrIp: !Ref ClientSubnet1Cidr
+        Description: Kerberos-Change-Set-Password
+      - IpProtocol: tcp
+        FromPort: 636
+        ToPort: 636
+        CidrIp: !Ref ClientSubnet1Cidr
+        Description: LDAP SSL
+      - IpProtocol: tcp
+        FromPort: 3268
+        ToPort: 3268
+        CidrIp: !Ref ClientSubnet1Cidr
+        Description: LDAP Global Catalog
+      - IpProtocol: tcp
+        FromPort: 3269
+        ToPort: 3269
+        CidrIp: !Ref ClientSubnet1Cidr
+        Description: LDAP Global Catalog SSL
+      - IpProtocol: tcp
+        FromPort: 3389
+        ToPort: 3389
+        CidrIp: !Ref ClientSubnet1Cidr
+        Description: Remote Desktop
+      - IpProtocol: tcp
+        FromPort: 9389
+        ToPort: 9389
+        CidrIp: !Ref ClientSubnet1Cidr
+        Description: AD DS Web Service
+      - IpProtocol: tcp
+        FromPort: 49152
+        ToPort: 65535
+        CidrIp: !Ref ClientSubnet1Cidr
+        Description: Dynamic Ports-RPC-DCOM-EPM-DRSUAPI-NetLogonR-SamR-FRS
+      - IpProtocol: udp
+        FromPort: 49152
+        ToPort: 65535
+        CidrIp: !Ref ClientSubnet1Cidr
+        Description: Dynamic Ports-RPC-DCOM-EPM-DRSUAPI-NetLogonR-SamR-FRS
+      - IpProtocol: tcp
+        FromPort: 53
+        ToPort: 53
+        CidrIp: !Ref ClientSubnet2Cidr
+        Description: DNS
+      - IpProtocol: udp
+        FromPort: 53
+        ToPort: 53
+        CidrIp: !Ref ClientSubnet2Cidr
+        Description: DNS
+      - IpProtocol: tcp
+        FromPort: 88
+        ToPort: 88
+        CidrIp: !Ref ClientSubnet2Cidr
+        Description: Kerberos
+      - IpProtocol: udp
+        FromPort: 88
+        ToPort: 88
+        CidrIp: !Ref ClientSubnet2Cidr
+        Description: Kerberos
+      - IpProtocol: udp
+        FromPort: 123
+        ToPort: 123
+        CidrIp: !Ref ClientSubnet2Cidr
+        Description: Windows Time
+      - IpProtocol: tcp
+        FromPort: 135
+        ToPort: 135
+        CidrIp: !Ref ClientSubnet2Cidr
+        Description: RPC-Endpoint Mapper
+      - IpProtocol: udp
+        FromPort: 137
+        ToPort: 137
+        CidrIp: !Ref ClientSubnet2Cidr
+        Description: NetLogon-NETBIOS Name Resolution
+      - IpProtocol: udp
+        FromPort: 138
+        ToPort: 138
+        CidrIp: !Ref ClientSubnet2Cidr
+        Description: DFSN-NetLogon-NetBIOS Datagram
+      - IpProtocol: tcp
+        FromPort: 389
+        ToPort: 389
+        CidrIp: !Ref ClientSubnet2Cidr
+        Description: LDAP
+      - IpProtocol: udp
+        FromPort: 389
+        ToPort: 389
+        CidrIp: !Ref ClientSubnet2Cidr
+        Description: LDAP
+      - IpProtocol: tcp
+        FromPort: 445
+        ToPort: 445
+        CidrIp: !Ref ClientSubnet2Cidr
+        Description: SMB-CIFS-SMB2-DFSN-LSARPC-NetLogonR-SamR-SrvSvc
+      - IpProtocol: tcp
+        FromPort: 464
+        ToPort: 464
+        CidrIp: !Ref ClientSubnet2Cidr
+        Description: Kerberos-Change-Set-Password
+      - IpProtocol: udp
+        FromPort: 464
+        ToPort: 464
+        CidrIp: !Ref ClientSubnet2Cidr
+        Description: Kerberos-Change-Set-Password
+      - IpProtocol: tcp
+        FromPort: 636
+        ToPort: 636
+        CidrIp: !Ref ClientSubnet2Cidr
+        Description: LDAP SSL
+      - IpProtocol: tcp
+        FromPort: 3268
+        ToPort: 3268
+        CidrIp: !Ref ClientSubnet2Cidr
+        Description: LDAP Global Catalog
+      - IpProtocol: tcp
+        FromPort: 3269
+        ToPort: 3269
+        CidrIp: !Ref ClientSubnet2Cidr
+        Description: LDAP Global Catalog SSL
+      - IpProtocol: tcp
+        FromPort: 3389
+        ToPort: 3389
+        CidrIp: !Ref ClientSubnet2Cidr
+        Description: Remote Desktop
+      - IpProtocol: tcp
+        FromPort: 9389
+        ToPort: 9389
+        CidrIp: !Ref ClientSubnet2Cidr
+        Description: AD DS Web Service
+      - IpProtocol: tcp
+        FromPort: 49152
+        ToPort: 65535
+        CidrIp: !Ref ClientSubnet2Cidr
+        Description: Dynamic Ports-RPC-DCOM-EPM-DRSUAPI-NetLogonR-SamR-FRS
+      - IpProtocol: udp
+        FromPort: 49152
+        ToPort: 65535
+        CidrIp: !Ref ClientSubnet2Cidr
+        Description: Dynamic Ports-RPC-DCOM-EPM-DRSUAPI-NetLogonR-SamR-FRS
+      SecurityGroupEgress:
+      - IpProtocol: tcp
+        FromPort: 0
+        ToPort: 65535
+        CidrIp: 0.0.0.0/0
+        Description: Outbound traffic
+      - IpProtocol: udp
+        FromPort: 0
+        ToPort: 65535
+        CidrIp: 0.0.0.0/0
+        Description: Outbound traffic 
+# Allows communication from the clients to the file server
+  vpcFsFromWindowsClientsSecurityGroup:
+    Metadata:
+      cfn_nag: 
+        rules_to_suppress: 
+          - id: W5
+            reason: "Required for Windows Servers to get Windows Updates"
+          # see https://aws.amazon.com/blogs/security/securely-extend-and-access-on-premises-active-directory-domain-controllers-in-aws/
+          - id: W27
+            reason: "Required for Windows AD Commmunication see above comment"
+          - id: W28
+            reason: "Resource will not be replaced in an update"
+          # see https://aws.amazon.com/blogs/security/securely-extend-and-access-on-premises-active-directory-domain-controllers-in-aws/
+          - id: W29
+            reason: "Required for Windows AD Commmunication see above comment"
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: VPC-FileServer-From-Windows-Clients-SecurityGroup
+      GroupDescription: Allows traffic from windows clients to File Servers
+      VpcId: !Ref vpc
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 135
+        ToPort: 135
+        CidrIp: !Ref OnPremCidr
+        Description: RPC-Endpoint Mapper
+      - IpProtocol: tcp
+        FromPort: 445
+        ToPort: 445
+        CidrIp: !Ref OnPremCidr
+        Description: SMB-CIFS-SMB2-DFSN-LSARPC-NetLogonR-SamR-SrvSvc
+      - IpProtocol: tcp
+        FromPort: 3389
+        ToPort: 3389
+        CidrIp: !Ref OnPremCidr
+        Description: Remote Desktop
+      - IpProtocol: tcp
+        FromPort: 49152
+        ToPort: 65535
+        CidrIp: !Ref OnPremCidr
+        Description: Dynamic Ports-RPC-DCOM-EPM-DRSUAPI-NetLogonR-SamR-FRS
+      - IpProtocol: tcp
+        FromPort: 135
+        ToPort: 135
+        CidrIp: !Ref DcSubnet1Cidr
+        Description: RPC-Endpoint Mapper
+      - IpProtocol: tcp
+        FromPort: 445
+        ToPort: 445
+        CidrIp: !Ref DcSubnet1Cidr
+        Description: SMB-CIFS-SMB2-DFSN-LSARPC-NetLogonR-SamR-SrvSvc
+      - IpProtocol: tcp
+        FromPort: 3389
+        ToPort: 3389
+        CidrIp: !Ref DcSubnet1Cidr
+        Description: Remote Desktop
+      - IpProtocol: tcp
+        FromPort: 49152
+        ToPort: 65535
+        CidrIp: !Ref DcSubnet1Cidr
+        Description: Dynamic Ports-RPC-DCOM-EPM-DRSUAPI-NetLogonR-SamR-FRS
+      - IpProtocol: tcp
+        FromPort: 135
+        ToPort: 135
+        CidrIp: !Ref DcSubnet2Cidr
+        Description: RPC-Endpoint Mapper
+      - IpProtocol: tcp
+        FromPort: 445
+        ToPort: 445
+        CidrIp: !Ref DcSubnet2Cidr
+        Description: SMB-CIFS-SMB2-DFSN-LSARPC-NetLogonR-SamR-SrvSvc
+      - IpProtocol: tcp
+        FromPort: 3389
+        ToPort: 3389
+        CidrIp: !Ref DcSubnet2Cidr
+        Description: Remote Desktop
+      - IpProtocol: tcp
+        FromPort: 49152
+        ToPort: 65535
+        CidrIp: !Ref DcSubnet2Cidr
+        Description: Dynamic Ports-RPC-DCOM-EPM-DRSUAPI-NetLogonR-SamR-FRS
+      - IpProtocol: tcp
+        FromPort: 135
+        ToPort: 135
+        CidrIp: !Ref ClientSubnet1Cidr
+        Description: RPC-Endpoint Mapper
+      - IpProtocol: tcp
+        FromPort: 445
+        ToPort: 445
+        CidrIp: !Ref ClientSubnet1Cidr
+        Description: SMB-CIFS-SMB2-DFSN-LSARPC-NetLogonR-SamR-SrvSvc
+      - IpProtocol: tcp
+        FromPort: 3389
+        ToPort: 3389
+        CidrIp: !Ref ClientSubnet1Cidr
+        Description: Remote Desktop
+      - IpProtocol: tcp
+        FromPort: 49152
+        ToPort: 65535
+        CidrIp: !Ref ClientSubnet1Cidr
+        Description: Dynamic Ports-RPC-DCOM-EPM-DRSUAPI-NetLogonR-SamR-FRS
+      - IpProtocol: tcp
+        FromPort: 135
+        ToPort: 135
+        CidrIp: !Ref ClientSubnet2Cidr
+        Description: RPC-Endpoint Mapper
+      - IpProtocol: tcp
+        FromPort: 445
+        ToPort: 445
+        CidrIp: !Ref ClientSubnet2Cidr
+        Description: SMB-CIFS-SMB2-DFSN-LSARPC-NetLogonR-SamR-SrvSvc
+      - IpProtocol: tcp
+        FromPort: 3389
+        ToPort: 3389
+        CidrIp: !Ref ClientSubnet2Cidr
+        Description: Remote Desktop
+      - IpProtocol: tcp
+        FromPort: 49152
+        ToPort: 65535
+        CidrIp: !Ref ClientSubnet2Cidr
+        Description: Dynamic Ports-RPC-DCOM-EPM-DRSUAPI-NetLogonR-SamR-FRS
+      SecurityGroupEgress:
+      - IpProtocol: tcp
+        FromPort: 0
+        ToPort: 65535
+        CidrIp: 0.0.0.0/0
+        Description: Outbound traffic
+      - IpProtocol: udp
+        FromPort: 0
+        ToPort: 65535
+        CidrIp: 0.0.0.0/0
+        Description: Outbound traffic 
+##### While the below "ALLOW ICMP" Security group is created, it is not attached to any instance by default. Built for troubleshooting purposes only and customer
+# has to attach if required. ALSO NOTE: Any attachment of this security group must also be accompanied by changes in Windows Firewall to allow ICMP. See Deployment
+# and Troubleshooting guides for more information.
+  AllowIcmpSecurityGroup:
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W28
+            reason: Resource will not be replaced on update
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: Allow-ICMP-SecurityGroup
+      GroupDescription: allows ICMP traffic inbound from prem and vpc subnets - can attach to instance if required - not attached by default. THIS SHOULD ONLY BE USED FOR TESTING PURPOSES.
+      VpcId: !Ref vpc
+      SecurityGroupIngress:
+      - IpProtocol: icmp
+        FromPort: -1
+        ToPort: -1
+        CidrIp: !Ref OnPremCidr
+        Description: ICMP
+      - IpProtocol: icmp
+        FromPort: -1
+        ToPort: -1
+        CidrIp: !Ref DcSubnet1Cidr
+        Description: ICMP
+      - IpProtocol: icmp
+        FromPort: -1
+        ToPort: -1
+        CidrIp: !Ref DcSubnet2Cidr
+        Description: ICMP
+      - IpProtocol: icmp
+        FromPort: -1
+        ToPort: -1
+        CidrIp: !Ref ClientSubnet1Cidr
+        Description: ICMP
+      - IpProtocol: icmp
+        FromPort: -1
+        ToPort: -1
+        CidrIp: !Ref ClientSubnet2Cidr
+        Description: ICMP
+      SecurityGroupEgress: 
+      - IpProtocol: icmp 
+        FromPort: -1
+        ToPort: -1
+        CidrIp: !Ref OnPremCidr
+        Description: ICMP
+      - IpProtocol: icmp
+        FromPort: -1
+        ToPort: -1
+        CidrIp: !Ref DcSubnet1Cidr
+        Description: ICMP 
+      - IpProtocol: icmp
+        FromPort: -1
+        ToPort: -1
+        CidrIp: !Ref DcSubnet2Cidr
+        Description: ICMP
+      - IpProtocol: icmp
+        FromPort: -1
+        ToPort: -1
+        CidrIp: !Ref ClientSubnet1Cidr
+        Description: ICMP
+      - IpProtocol: icmp
+        FromPort: -1
+        ToPort: -1
+        CidrIp: !Ref ClientSubnet2Cidr
+        Description: ICMP
+# Ther key pair for decrypting the Windows Administrator passwords on the EC2 instances.
+  theKeyPair:
+    Type: AWS::EC2::KeyPair
+    Properties:
+      KeyName: windows-key-pair
+      KeyFormat: pem
+# EC2 instances are "built" - we build the network interfaces so that we can assign the correct IP addresses to them in accordance with either the defaults or 
+# customer requirement. We then attach the network interface to the instance in the instance resource section.
+  domainController1NetworkInterface:
+    Type: AWS::EC2::NetworkInterface
+    Properties:
+      Description: ENI for DomainController1
+      PrivateIpAddress: !Ref VpcDc1Ip
+      SubnetId: !Ref subnetPrivate1
+      GroupSet:
+      - !GetAtt vpcDcsFromPremDcSecurityGroup.GroupId
+      - !GetAtt vpcDcsFromVpcDcsSecurityGroup.GroupId
+      - !GetAtt vpcDcsFromWindowsClientsSecurityGroup.GroupId
+      Tags: 
+        - Key: Name
+          Value: !Join ['-', [!Ref VpcDc1Name, '-Network-Interface']]
+        - Key: AWS Starter-Kit-Name
+          Value: Windows-Migration
+  domainController2NetworkInterface:
+    Type: AWS::EC2::NetworkInterface
+    Properties:
+      Description: ENI for DomainController2
+      PrivateIpAddress: !Ref VpcDc2Ip
+      SubnetId: !Ref subnetPrivate2
+      GroupSet:
+      - !GetAtt vpcDcsFromPremDcSecurityGroup.GroupId
+      - !GetAtt vpcDcsFromVpcDcsSecurityGroup.GroupId
+      - !GetAtt vpcDcsFromWindowsClientsSecurityGroup.GroupId
+      Tags: 
+        - Key: Name
+          Value: !Join ["-", [!Ref VpcDc2Name, "-Network-Interface"]]
+        - Key: AWS Starter-Kit-Name
+          Value: Windows-Migration
+  fileServer1NetworkInterface:
+    Type: AWS::EC2::NetworkInterface
+    Properties:
+      Description: ENI for FileServer1
+      PrivateIpAddress: !Ref VpcFs1Ip
+      SubnetId: !Ref subnetPrivate3
+      GroupSet:
+      - !GetAtt vpcFsFromWindowsClientsSecurityGroup.GroupId
+      Tags: 
+        - Key: Name
+          Value: !Join ["-", [!Ref VpcFs1Name, "-Network-Interface"]]
+        - Key: AWS Starter-Kit-Name
+          Value: Windows-Migration
+# EC2 instances are "built" - we build the EBS Volumes for the data volumes, then attach the volume to the instance in the instance resource section.
+  Dc1DDrive:
+    Metadata: 
+      cfn_nag: 
+        rules_to_suppress: 
+          - id: W37
+            reason: "Encyrpted with aws managed key encryption set to true"
+    Type: AWS::EC2::Volume
+    Properties: 
+      AvailabilityZone: 
+        Fn::Select:
+          - 0
+          - Fn::GetAZs: ''
+      Encrypted: true
+      Iops: 3000
+      Throughput: 125
+      Size: 15
+      VolumeType: gp3
+      Tags: 
+        - Key: Name
+          Value: !Join ["-", [!Ref VpcDc1Name, "-Data-Drive"]]
+        - Key: AWS Starter-Kit-Name
+          Value: Windows-Migration
+# Note - The AZ that this volume is created in has to match Private Subnet 1, thus the rules (mappings have to support supported WorkSpaces regions/AZs)
+  Fs1DDrive:
+    Metadata: 
+      cfn_nag: 
+        rules_to_suppress: 
+          - id: W37
+            reason: "Encyrpted with aws managed key encryption set to true"
+    Type: AWS::EC2::Volume
+    Properties: 
+      AvailabilityZone: !If [RegionIsUsEast1, '{{resolve:ssm:azmap-use1-az4}}', !If [RegionIsUsWest2, '{{resolve:ssm:azmap-usw2-az2}}', !If [RegionIsCaCentral1, '{{resolve:ssm:azmap-cac1-az1}}', !If [RegionIsUsEast2, 'us-east-2a', 'us-west-1a']]]]
+      Encrypted: true
+      Iops: 3000
+      Throughput: 125
+      Size: !If [FsStorageIs50G, '50', !If [FsStorageIs100G, '100', !If [FsStorageIs500G, '500', !If [FsStorageIs1T, '1000', '250']]]]
+      VolumeType: gp3
+      Tags: 
+        - Key: Name
+          Value: !Join ["-", [!Ref VpcFs1Name, "-Data-Drive"]]
+        - Key: AWS Starter-Kit-Name
+          Value: Windows-Migration 
+# Domain Controller # 1
+# Notes for the Powershell script in User data: 
+# Lines 1-19 assign the private IP address, netmask, default gateway and DNS servers to the ethernet interface in Windows. Required in Windows for Domain controllers to be able to promote.
+# Line 20 creates a Helper-Scripts directory in the root of C: that holds all of the automation scripts.
+# Line 21 creates the helper script that joins the computer to the domain.
+# Line 22 creates the helper script which adds the AD Domain Services role and promotes the domain controller.
+# Line 23 creates the helper script which moves the FSMO roles.
+# Line 24 creates the helper script which tests replication and prints out the results to a txt file.
+# Line 25 creates the helper script which sets up the System state backup job in Windows, backing up AD hourly to the D Drive.
+# Lines 26-124 create the Helper Script that creates the AD Group and Delegation which prepare Active Directory for integration with AWS AD Connector 
+# via AD Connector Starter Kit.
+# Lines 125-132 creates the helper script which sets Network time on the DC to the AWS NTP source.
+# Line 133 creates the disk partition and activates the disk for the D: Drive.
+# Line 136 renames the computer to the computer name parameter and restarts Windows.
+# The instances have additional tags which are specific to AWS backup, allowing customization of backup plan based on backup role if the customer requires additional
+# customizatin of the backup plan or jobs.
+  domainController1:
+    Metadata:
+      checkov:
+        skip:
+          - id: "CKV_AWS_46"
+            comment: "Powershell script references standard Windows GUIDs and no secrets are hard coded."
+    Type: AWS::EC2::Instance
+    Properties:
+      LaunchTemplate: 
+        LaunchTemplateId: !Ref ec2LaunchTemplate
+        Version: !GetAtt ec2LaunchTemplate.LatestVersionNumber
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            VolumeType: gp3
+            VolumeSize: 50
+            DeleteOnTermination: true
+            Encrypted: true
+      InstanceType: !If [VcpuIsAmd, 't3a.small', 't3.small']
+      ImageId: !Ref LatestAmiId
+      KeyName: !Ref theKeyPair
+      IamInstanceProfile: !Ref theInstanceProfile
+      NetworkInterfaces:
+        - NetworkInterfaceId: !Ref domainController1NetworkInterface
+          DeviceIndex: '0'
+      Volumes: 
+        - Device: /dev/sdb
+          VolumeId: !GetAtt Dc1DDrive.VolumeId
+      UserData:
+        Fn::Base64: !Sub |
+          <powershell>
+          $IP = "${VpcDc1Ip}"
+          $nm = "${DcSubnet1Cidr}"
+          $nm = $nm.Split("/",2)[1]
+          $gw = (Get-Netroute "0.0.0.0/0").Nexthop
+          $Dns = "${OnPremDcIp}"
+          $IPType = "IPv4"
+          $adapter = Get-NetAdapter | ? {$_.Status -eq "up"}
+          If (($adapter | Get-NetIPConfiguration).IPv4Address.IPAddress) {
+          $adapter | Remove-NetIPAddress -AddressFamily $IPType -Confirm:$false
+          }
+          If (($adapter | Get-NetIPConfiguration).Ipv4DefaultGateway) {
+          $adapter | Remove-NetRoute -AddressFamily $IPType -Confirm:$false
+          }
+          $adapter | New-NetIPAddress `
+          -AddressFamily $IPType `
+          -IPAddress $IP `
+          -PrefixLength $nm `
+          -DefaultGateway $gw
+          $adapter | Set-DnsClientServerAddress -ServerAddresses $Dns
+          New-Item -Path 'C:\Helper-Scripts' -ItemType Directory 
+          Set-Content -Path C:\Helper-Scripts\1_Join-On-Prem-Domain.ps1 -Value "Add-Computer -DomainName ${OnPremDomainName} `nRestart-Computer"
+          Set-Content -Path c:\Helper-Scripts\2_Promote-This-Server-To-Domain-Controller.ps1 -Value "Install-WindowsFeature -Name AD-Domain-Services,DNS,Windows-Server-Backup -IncludeManagementTools `nInstall-ADDSDomainController -InstallDns -DomainName ${OnPremDomainName}"
+          Set-Content -Path C:\Helper-Scripts\Utility-Move-FSMO-Roles-To-This-DC.ps1 -Value "Move-ADDirectoryServerOperationMasterRole ${VpcDc1Name} -OperationMasterRole 0,1,2,3,4 `nnetdom /query fsmo > c:\helper-scripts\fsmo-report.txt"
+          Set-Content -Path C:\Helper-Scripts\3_Test-Replication.ps1 -Value "repadmin /replsummary > c:\Helper-Scripts\Replication-Test-Results.txt`nrepadmin /showrepl >> c:\Helper-Scripts\Replication-Test-Results.txt`ndcdiag.exe >> c:\Helper-Scripts\Replication-Test-Results.txt"
+          Set-Content -Path c:\Helper-Scripts\4_Finish-DC-Setup.ps1 -Value "wbadmin enable backup -addtarget:D: -systemState -schedule:00:40,01:40,02:40,03:40,04:40,05:40,06:40,07:40,08:40,09:40,10:40,11:40,12:40,13:40,14:40,15:40,16:40,17:40,18:40,19:40,20:40,21:40,22:40,23:40 -quiet" 
+          $domain = "${OnPremDomainName}"
+          $sub_domain = $domain.Split(".",2)[0]
+          $tld = $domain.Split(".",2)[1]
+          $group_cn = "CN=Users,DC=$sub_domain,DC=$tld"
+          $domain_dn = "DC=$sub_domain,DC=$tld"
+          $adconn_group_name = "AwsConnectors"
+          $adconn_display_name = "AWS AD Connectors"
+          $group_description = "Members of this group are delegated controls for AWS AD Connector which connects AWS Services to the Windows Domain. DO NOT ADD USERS OR GROUPS TO THIS GROUP EXCEPT FOR THE AWS AD CONNECTOR USER ACCOUNT"
+          Set-Content -Path C:\Helper-Scripts\Utility-Prepare-AD-Connector.ps1 -Value "#Powershell Script to Prepare Active Directory to Add AWS AD Connector"
+          $out = "New-ADGroup -Name `"$adconn_group_name`" -SamAccountName $adconn_group_name -GroupCategory Security -GroupScope Global -DisplayName `"$adconn_display_name`" -Path `"$group_cn`" -Description `"$group_description`""
+          Add-Content -Path C:\Helper-Scripts\Utility-Prepare-AD-Connector.ps1 -Value $out
+          $out = '$dn = ' + "`"$domain_dn`"" 
+          Add-Content -Path C:\Helper-Scripts\Utility-Prepare-AD-Connector.ps1 -Value $out
+          $out = '$group = ' + "Get-ADGroup -Identity $adconn_group_name"
+          Add-Content -Path C:\Helper-Scripts\Utility-Prepare-AD-Connector.ps1 -Value $out
+          $out = '$sid = ' + "[System.Security.Principal.SecurityIdentifier] " + '$group' + ".SID"
+          Add-Content -Path C:\Helper-Scripts\Utility-Prepare-AD-Connector.ps1 -Value $out
+          $out = '$id = ' + "[System.Security.Principal.IdentityReference] " +  '$sid'
+          Add-Content -Path C:\Helper-Scripts\Utility-Prepare-AD-Connector.ps1 -Value $out
+          $out = '$activeDirectoryRights = ' + "[System.DirectoryServices.ActiveDirectoryRights] `"CreateChild`",`"DeleteChild`""
+          Add-Content -Path C:\Helper-Scripts\Utility-Prepare-AD-Connector.ps1 -Value $out
+          $out = '$accessControlType = ' + "[System.Security.AccessControl.AccessControlType] `"Allow`""
+          Add-Content -Path C:\Helper-Scripts\Utility-Prepare-AD-Connector.ps1 -Value $out
+          $out = '$objectType = ' + "[guid] `"bf967a86-0de6-11d0-a285-00aa003049e2`""
+          Add-Content -Path C:\Helper-Scripts\Utility-Prepare-AD-Connector.ps1 -Value $out
+          $out = '$inheritanceType = ' + "[System.DirectoryServices.ActiveDirectorySecurityInheritance] `"All`""
+          Add-Content -Path C:\Helper-Scripts\Utility-Prepare-AD-Connector.ps1 -Value $out
+          $out = '$inheritedObjectType = ' + "[guid] `"00000000-0000-0000-0000-000000000000`""
+          Add-Content -Path C:\Helper-Scripts\Utility-Prepare-AD-Connector.ps1 -Value $out
+          $out = '$ace = ' + "New-Object System.DirectoryServices.ActiveDirectoryAccessRule " + '$id' + "," + '$activeDirectoryRights' + "," + '$accessControlType' +"," + '$objectType' + "," + '$inheritanceType' + "," + '$inheritedObjectType'
+          Add-Content -Path C:\Helper-Scripts\Utility-Prepare-AD-Connector.ps1 -Value $out
+          $out = '$object = ' + "[adsi]`"LDAP://" + '$dn' + "`"" 
+          Add-Content -Path C:\Helper-Scripts\Utility-Prepare-AD-Connector.ps1 -Value $out
+          $out = '$modified = '+ '$false'
+          Add-Content -Path C:\Helper-Scripts\Utility-Prepare-AD-Connector.ps1 -Value $out
+          $out = '$object' + ".PSBase.ObjectSecurity.ModifyAccessRule([System.Security.AccessControl.AccessControlModification]::Add," + '$ace' + ",[ref]" + '$modified)'
+          Add-Content -Path C:\Helper-Scripts\Utility-Prepare-AD-Connector.ps1 -Value $out
+          $out = '$object' + ".PSBase.CommitChanges()"
+          Add-Content -Path C:\Helper-Scripts\Utility-Prepare-AD-Connector.ps1 -Value $out
+          $out = '$activeDirectoryRights = ' + "[System.DirectoryServices.ActiveDirectoryRights] `"CreateChild`",`"DeleteChild`"" 
+          Add-Content -Path C:\Helper-Scripts\Utility-Prepare-AD-Connector.ps1 -Value $out
+          $out = '$accessControlType = ' + "[System.Security.AccessControl.AccessControlType] `"Allow`""
+          Add-Content -Path C:\Helper-Scripts\Utility-Prepare-AD-Connector.ps1 -Value $out
+          $out = '$objectType = ' + "[guid] `"bf967aba-0de6-11d0-a285-00aa003049e2`""
+          Add-Content -Path C:\Helper-Scripts\Utility-Prepare-AD-Connector.ps1 -Value $out
+          $out = '$inheritanceType = ' + "[System.DirectoryServices.ActiveDirectorySecurityInheritance] `"All`""
+          Add-Content -Path C:\Helper-Scripts\Utility-Prepare-AD-Connector.ps1 -Value $out
+          $out = '$inheritedObjectType = ' + "[guid] `"00000000-0000-0000-0000-000000000000`""
+          Add-Content -Path C:\Helper-Scripts\Utility-Prepare-AD-Connector.ps1 -Value $out
+          $out = '$ace = ' + "New-Object System.DirectoryServices.ActiveDirectoryAccessRule " + '$id' + "," + '$activeDirectoryRights' + "," + '$accessControlType' +"," + '$objectType' + "," + '$inheritanceType' + "," + '$inheritedObjectType'
+          Add-Content -Path C:\Helper-Scripts\Utility-Prepare-AD-Connector.ps1 -Value $out
+          $out = '$object = ' + "[adsi]`"LDAP://" + '$dn' + "`""
+          Add-Content -Path C:\Helper-Scripts\Utility-Prepare-AD-Connector.ps1 -Value $out
+          $out = '$modified = '+ '$false'
+          Add-Content -Path C:\Helper-Scripts\Utility-Prepare-AD-Connector.ps1 -Value $out
+          $out = '$object' + ".PSBase.ObjectSecurity.ModifyAccessRule([System.Security.AccessControl.AccessControlModification]::Add," + '$ace' + ",[ref]" + '$modified)'
+          Add-Content -Path C:\Helper-Scripts\Utility-Prepare-AD-Connector.ps1 -Value $out
+          $out = '$object' + ".PSBase.CommitChanges()"
+          Add-Content -Path C:\Helper-Scripts\Utility-Prepare-AD-Connector.ps1 -Value $out
+          $out = '$activeDirectoryRights = ' + "[System.DirectoryServices.ActiveDirectoryRights] `"ListChildren`",`"ReadProperty`",`"GenericWrite`""
+          Add-Content -Path C:\Helper-Scripts\Utility-Prepare-AD-Connector.ps1 -Value $out
+          $out = '$accessControlType = ' + "[System.Security.AccessControl.AccessControlType] `"Allow`""
+          Add-Content -Path C:\Helper-Scripts\Utility-Prepare-AD-Connector.ps1 -Value $out
+          $out = '$objectType = ' + "[guid] `"00000000-0000-0000-0000-000000000000`""
+          Add-Content -Path C:\Helper-Scripts\Utility-Prepare-AD-Connector.ps1 -Value $out
+          $out = '$inheritanceType = ' + "[System.DirectoryServices.ActiveDirectorySecurityInheritance] `"All`""
+          Add-Content -Path C:\Helper-Scripts\Utility-Prepare-AD-Connector.ps1 -Value $out
+          $out = '$inheritedObjectType = ' + "[guid] `"bf967a86-0de6-11d0-a285-00aa003049e2`""
+          Add-Content -Path C:\Helper-Scripts\Utility-Prepare-AD-Connector.ps1 -Value $out
+          $out = '$ace = ' + "New-Object System.DirectoryServices.ActiveDirectoryAccessRule " + '$id' + "," + '$activeDirectoryRights' + "," + '$accessControlType' +"," + '$objectType' + "," + '$inheritanceType' + "," + '$inheritedObjectType'
+          Add-Content -Path C:\Helper-Scripts\Utility-Prepare-AD-Connector.ps1 -Value $out
+          $out = '$object = ' + "[adsi]`"LDAP://" + '$dn' + "`""
+          Add-Content -Path C:\Helper-Scripts\Utility-Prepare-AD-Connector.ps1 -Value $out
+          $out = '$modified = '+ '$false'
+          Add-Content -Path C:\Helper-Scripts\Utility-Prepare-AD-Connector.ps1 -Value $out
+          $out = '$object' + ".PSBase.ObjectSecurity.ModifyAccessRule([System.Security.AccessControl.AccessControlModification]::Add," + '$ace' + ",[ref]" + '$modified)'
+          Add-Content -Path C:\Helper-Scripts\Utility-Prepare-AD-Connector.ps1 -Value $out
+          $out = '$object' + ".PSBase.CommitChanges()"
+          Add-Content -Path C:\Helper-Scripts\Utility-Prepare-AD-Connector.ps1 -Value $out
+          $out = '$activeDirectoryRights = ' + "[System.DirectoryServices.ActiveDirectoryRights] `"ListChildren`",`"ReadProperty`",`"GenericWrite`""
+          Add-Content -Path C:\Helper-Scripts\Utility-Prepare-AD-Connector.ps1 -Value $out
+          $out = '$accessControlType = ' + "[System.Security.AccessControl.AccessControlType] `"Allow`""
+          Add-Content -Path C:\Helper-Scripts\Utility-Prepare-AD-Connector.ps1 -Value $out
+          $out = '$objectType = ' + "[guid] `"00000000-0000-0000-0000-000000000000`""
+          Add-Content -Path C:\Helper-Scripts\Utility-Prepare-AD-Connector.ps1 -Value $out
+          $out = '$inheritanceType = ' + "[System.DirectoryServices.ActiveDirectorySecurityInheritance] `"All`""
+          Add-Content -Path C:\Helper-Scripts\Utility-Prepare-AD-Connector.ps1 -Value $out
+          $out = '$inheritedObjectType = ' + "[guid] `"bf967aba-0de6-11d0-a285-00aa003049e2`""
+          Add-Content -Path C:\Helper-Scripts\Utility-Prepare-AD-Connector.ps1 -Value $out
+          $out = '$ace = ' + "New-Object System.DirectoryServices.ActiveDirectoryAccessRule " + '$id' + "," + '$activeDirectoryRights' + "," + '$accessControlType' +"," + '$objectType' + "," + '$inheritanceType' + "," + '$inheritedObjectType'
+          Add-Content -Path C:\Helper-Scripts\Utility-Prepare-AD-Connector.ps1 -Value $out
+          $out = '$object = ' + "[adsi]`"LDAP://" + '$dn' + "`""
+          Add-Content -Path C:\Helper-Scripts\Utility-Prepare-AD-Connector.ps1 -Value $out
+          $out = '$modified = '+ '$false'
+          Add-Content -Path C:\Helper-Scripts\Utility-Prepare-AD-Connector.ps1 -Value $out
+          $out = '$object' + ".PSBase.ObjectSecurity.ModifyAccessRule([System.Security.AccessControl.AccessControlModification]::Add," + '$ace' + ",[ref]" + '$modified)'
+          Add-Content -Path C:\Helper-Scripts\Utility-Prepare-AD-Connector.ps1 -Value $out
+          $out = '$object' + ".PSBase.CommitChanges()"
+          Add-Content -Path C:\Helper-Scripts\Utility-Prepare-AD-Connector.ps1 -Value $out
+          Set-Content -Path C:\Helper-Scripts\Utility-Sync-Time-To-External-Clock.ps1 -Value "w32tm /config /syncfromflags:NO /update"
+          Add-Content -Path C:\Helper-Scripts\Utility-Sync-Time-To-External-Clock.ps1 -Value "w32tm /config /syncfromflags:manual /manualpeerlist:`"169.254.169.123`" /update /reliable:yes"
+          Add-Content -Path C:\Helper-Scripts\Utility-Sync-Time-To-External-Clock.ps1 -Value "w32tm /resync"
+          Add-Content -Path C:\Helper-Scripts\Utility-Sync-Time-To-External-Clock.ps1 -Value "net stop w32time"
+          Add-Content -Path C:\Helper-Scripts\Utility-Sync-Time-To-External-Clock.ps1 -Value "net start w32time"
+          Add-Content -Path C:\Helper-Scripts\Utility-Sync-Time-To-External-Clock.ps1 -Value "w32tm /query /status > timesync-results.txt"
+          Add-Content -Path C:\Helper-Scripts\Utility-Sync-Time-To-External-Clock.ps1 -Value "w32tm /query /peers >> timesync-results.txt"
+          Add-Content -Path C:\Helper-Scripts\Utility-Sync-Time-To-External-Clock.ps1 -Value "w32tm /query /configuration >> timesync-results.txt"
+          Get-Disk | Where-Object Number -eq 1 | Initialize-Disk -PartitionStyle GPT -PassThru | New-Volume -FileSystem NTFS -Driveletter D -FriendlyName "System State Backups"
+          Rename-Computer -NewName "${VpcDc1Name}"
+          Restart-Computer 
+          </powershell>
+      Tags:
+        - Key: Name
+          Value: !Ref VpcDc1Name
+        - Key: BackupRequirement
+          Value: BackupRequired
+        - Key: BackupRole
+          Value: DomainController
+        - Key: AWS Starter-Kit-Name
+          Value: Windows-Migration
+# Domain Controller # 2
+# Notes for the Powershell script in User data: 
+# Lines 1-19 assign the private IP address, netmask, default gateway and DNS servers to the ethernet interface in Windows. Required in Windows for Domain controllers to be able to promote.
+# Line 20 creates a Helper-Scripts directory in the root of C: that holds all of the automation scripts.
+# Line 21 creates the helper script that joins the computer to the domain.
+# Line 22 creates the helper script which adds the AD Domain Services role and promotes the domain controller.
+# Line 23 creates the helper script which moves the FSMO roles.
+# Line 24 creates the helper script which tests replication and prints out the results to a txt file.
+# Line 25 renames the computer to the computer name parameter and restarts Windows.
+# The instances have additional tags which are specific to AWS backup, allowing customization of backup plan based on backup role if the customer requires additional
+# customizatin of the backup plan or jobs.
+  domainController2:
+    Type: AWS::EC2::Instance
+    Properties:
+      LaunchTemplate: 
+        LaunchTemplateId: !Ref ec2LaunchTemplate
+        Version: !GetAtt ec2LaunchTemplate.LatestVersionNumber
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            VolumeType: gp3
+            VolumeSize: 50
+            DeleteOnTermination: true
+            Encrypted: true
+      InstanceType: !If [VcpuIsAmd, 't3a.small', 't3.small']
+      ImageId: !Ref LatestAmiId
+      KeyName: !Ref theKeyPair
+      IamInstanceProfile: !Ref theInstanceProfile
+      NetworkInterfaces:
+        - NetworkInterfaceId: !Ref domainController2NetworkInterface
+          DeviceIndex: '0'
+      UserData:
+        Fn::Base64: !Sub |
+          <powershell>
+          $IP = "${VpcDc2Ip}"
+          $nm = "${DcSubnet2Cidr}"
+          $nm = $nm.Split("/",2)[1]
+          $gw = (Get-Netroute "0.0.0.0/0").Nexthop
+          $Dns = "${VpcDc1Ip}"
+          $IPType = "IPv4"
+          $adapter = Get-NetAdapter | ? {$_.Status -eq "up"}
+          If (($adapter | Get-NetIPConfiguration).IPv4Address.IPAddress) {
+          $adapter | Remove-NetIPAddress -AddressFamily $IPType -Confirm:$false
+          }
+          If (($adapter | Get-NetIPConfiguration).Ipv4DefaultGateway) {
+          $adapter | Remove-NetRoute -AddressFamily $IPType -Confirm:$false
+          }
+          $adapter | New-NetIPAddress `
+          -AddressFamily $IPType `
+          -IPAddress $IP `
+          -PrefixLength $nm `
+          -DefaultGateway $gw
+          $adapter | Set-DnsClientServerAddress -ServerAddresses $Dns
+          New-Item -Path 'C:\Helper-Scripts' -ItemType Directory 
+          Set-Content -Path C:\Helper-Scripts\1_Join-On-Prem-Domain.ps1 -Value "Add-Computer -DomainName ${OnPremDomainName} `nRestart-Computer"
+          Set-Content -Path c:\Helper-Scripts\2_Promote-This-Server-To-Domain-Controller.ps1 -Value "Install-WindowsFeature -Name AD-Domain-Services,DNS,Windows-Server-Backup -IncludeManagementTools `nInstall-ADDSDomainController -InstallDns -DomainName ${OnPremDomainName}"
+          Set-Content -Path C:\Helper-Scripts\Utility-Move-FSMO-Roles-To-This-DC.ps1 -Value "Move-ADDirectoryServerOperationMasterRole ${VpcDc2Name} -OperationMasterRole 0,1,2,3,4 `nnetdom /query fsmo > c:\helper-scripts\fsmo-report.txt"
+          Set-Content -Path C:\Helper-Scripts\3_Test-Replication.ps1 -Value "repadmin /replsummary > c:\Helper-Scripts\Replication-Test-Results.txt`nrepadmin /showrepl >> c:\Helper-Scripts\Replication-Test-Results.txt`ndcdiag.exe >> c:\Helper-Scripts\Replication-Test-Results.txt"
+          Rename-Computer -NewName "${VpcDc2Name}"
+          Restart-Computer 
+          </powershell>
+      Tags:
+        - Key: Name
+          Value: !Ref VpcDc2Name
+        - Key: AWS Starter-Kit-Name
+          Value: Windows-Migration-Pack
+# File Server # 1
+# Notes for the Powershell script in User data: 
+# Lines 1-19 assign the private IP address, netmask, default gateway and DNS servers to the ethernet interface in Windows. Required in Windows for Domain controllers to be able to promote.
+# Line 20 creates a Helper-Scripts directory in the root of C: that holds all of the automation scripts.
+# Line 21 creates the helper script which joins the computer to the domain.
+# Line 22 creates the helper script that installs the file server roles on the server.
+# Lines 23-29 creates the helper script which migrates the files over from the on -prem file server.
+# Line 30 renames and restarts the computer.
+# The instances have additional tags which are specific to AWS backup, allowing customization of backup plan based on backup role if the customer requires additional
+# customizatin of the backup plan or jobs.
+  fileServer1:
+    Type: AWS::EC2::Instance
+    Properties:
+      LaunchTemplate: 
+        LaunchTemplateId: !Ref ec2LaunchTemplate
+        Version: !GetAtt ec2LaunchTemplate.LatestVersionNumber
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            VolumeType: gp3
+            VolumeSize: 80
+            DeleteOnTermination: true
+            Encrypted: true
+      InstanceType: !If [VcpuIsAmd, 'm6a.large', 'm6i.large']
+      ImageId: !Ref LatestAmiId
+      KeyName: !Ref theKeyPair
+      IamInstanceProfile: !Ref theInstanceProfile
+      NetworkInterfaces:
+        - NetworkInterfaceId: !Ref fileServer1NetworkInterface
+          DeviceIndex: '0'
+      Volumes: 
+        - Device: /dev/sdb
+          VolumeId: !GetAtt Fs1DDrive.VolumeId
+      UserData:
+        Fn::Base64: !Sub |
+          <powershell>
+          $IP = "${VpcFs1Ip}"
+          $nm = "${ClientSubnet1Cidr}"
+          $nm = $nm.Split("/",2)[1]
+          $gw = (Get-Netroute "0.0.0.0/0").Nexthop
+          $Dns = "${VpcDc1Ip}"
+          $IPType = "IPv4"
+          $adapter = Get-NetAdapter | ? {$_.Status -eq "up"}
+          If (($adapter | Get-NetIPConfiguration).IPv4Address.IPAddress) {
+          $adapter | Remove-NetIPAddress -AddressFamily $IPType -Confirm:$false
+          }
+          If (($adapter | Get-NetIPConfiguration).Ipv4DefaultGateway) {
+          $adapter | Remove-NetRoute -AddressFamily $IPType -Confirm:$false
+          }
+          $adapter | New-NetIPAddress `
+          -AddressFamily $IPType `
+          -IPAddress $IP `
+          -PrefixLength $nm `
+          -DefaultGateway $gw
+          $adapter | Set-DnsClientServerAddress -ServerAddresses $Dns
+          New-Item -Path 'C:\Helper-Scripts' -ItemType Directory 
+          Set-Content -Path C:\Helper-Scripts\1_Join-Domain.ps1 -Value "Add-Computer -DomainName ${OnPremDomainName} `nRestart-Computer"
+          Set-Content -Path c:\Helper-Scripts\2_Install-File-Services.ps1 -Value "Install-WindowsFeature -Name FS-FileServer -IncludeManagementTools"
+          Set-Content -Path c:\Helper-Scripts\3_Migrate-File-Server.ps1 -Value "#File Server Migration Automation"
+          $opfs = "${OnPremFsName}"
+          $shares = "${OnPremFsShares}"
+          $shares = $shares.Split(",")
+          foreach ($item in $shares) {
+          Add-content -Path c:\Helper-Scripts\3_Migrate-File-Server.ps1 -Value "robocopy \\${OnPremFsName}\$item \\${VpcFs1Name}\D$\$item /E /Z /COPY:DATSOU /R:5 /W:5 /MT:8 /LOG:C:\Helper-Scripts\$item-robocopy-log.log`nnet share $item=d:\$item`n"}
+          Get-Disk | Where-Object Number -eq 1 | Initialize-Disk -PartitionStyle GPT -PassThru | New-Volume -FileSystem NTFS -Driveletter D -FriendlyName "File Storage"
+          Rename-Computer -NewName "${VpcFs1Name}"
+          Restart-Computer 
+          </powershell>
+      Tags:
+        - Key: Name
+          Value: vpc-fs01
+        - Key: BackupRequirement
+          Value: BackupRequired
+        - Key: BackupRole
+          Value: FileServer
+        - Key: AWS Starter-Kit-Name
+          Value: Windows-Migration
+# KMS Key for use by the Windows Starter Kit Catalog. 
+  TheKmsKey: 
+    Type: AWS::KMS::Key
+    Properties: 
+      Description: "General Use KMS Key for Windows Migration Workload"
+      EnableKeyRotation: true
+      PendingWindowInDays: 7
+      KeyPolicy: 
+        Version: 2012-10-17
+        Id: key-default-1
+        Statement: 
+          - Sid: Enable IAM User Permissions
+            Effect: Allow
+            Principal: 
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action: kms:*
+            Resource: "*"
+          - Sid: Allow SNS Decrypt and Encrypt
+            Effect: Allow
+            Principal: 
+              Service: sns.amazonaws.com
+            Action: 
+              - kms:GenerateDataKey
+              - kms:Decrypt
+              - kms:Encrypt
+            Resource: "*"
+          - Sid: Allow Cloudwatch Alarms to use the key
+            Effect: Allow
+            Principal: 
+              Service: cloudwatch.amazonaws.com
+            Action: 
+              - kms:GenerateDataKey
+              - kms:Encrypt
+              - kms:Decrypt
+            Resource: "*"
+      Tags: 
+        - Key: Name
+          Value: Windows-Migration-General-Use-Key
+        - Key: AWS Starter-Kit-Name
+          Value: Windows-Migration
+# Alias for the KMS Key which makes it wasy to import or referenace the value in other Starter Kit stacks.
+  TheKmsKeyAlias: 
+    Type: AWS::KMS::Alias 
+    Properties: 
+      AliasName: alias/windows-migration-kms-key
+      TargetKeyId: !Ref TheKmsKey
+# This is the SNS topic  and topic policy where alarms get published to.
+  AlarmsSnsTopicPolicy: 
+    Type: AWS::SNS::TopicPolicy
+    Properties: 
+      PolicyDocument: 
+        Id: AlarmsTopicPolicy
+        Version: "2012-10-17"
+        Statement: 
+          - Sid: "Allow-Publish-To-SNS-Topic"
+            Effect: "Allow"
+            Principal: 
+              Service: "cloudwatch.amazonaws.com"
+            Action: 
+              - "sns:Publish"
+            Resource: "*"
+      Topics: 
+        - !Ref AlarmsSnsTopic
+  AlarmsSnsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Join ['-', [!Ref AWS::StackName, "alerts-sns-topic", !Select [4, !Split ["-", !Select [2, !Split ['/', Ref: AWS::StackId]]]]]]
+      KmsMasterKeyId: !Ref TheKmsKey
+      Subscription:
+        - Endpoint: !Ref AlertsEmailAddress
+          Protocol: "email"
+      Tags: 
+        - Key: Name
+          Value: general-alerts-sns-topic
+        - Key: AWS Starter-Kit-Name
+          Value: Windows-Migration
+# This creates the backup vault.
+  TheBackupVault:
+    Type: AWS::Backup::BackupVault
+    Properties: 
+      BackupVaultName: !Sub ${AWS::StackName}-backup-vault
+      EncryptionKeyArn: !GetAtt TheKmsKey.Arn
+# Monthly backuop plan. 
+  TheMonthlyBackupPlan:
+    Type: AWS::Backup::BackupPlan
+    Properties:
+      BackupPlan:
+        BackupPlanName: !Sub ${AWS::StackName}-monthly-backup-plan
+        BackupPlanRule:
+          - RuleName: monthly-backups
+            TargetBackupVault: !Ref TheBackupVault
+            ScheduleExpression: cron(0 6 1 * ? *)
+            StartWindowMinutes: 60
+            Lifecycle:
+              MoveToColdStorageAfterDays: 63
+              DeleteAfterDays: 366
+      BackupPlanTags: 
+        Key: AWS Starter-Kit-Name
+        Value: Windows-Migration
+# Hurly backup plan.
+  TheHourlyBackupPlan:
+    Type: AWS::Backup::BackupPlan
+    Properties:
+      BackupPlan:
+        BackupPlanName: !Sub ${AWS::StackName}-hourly-backup-plan
+        BackupPlanRule:
+          - RuleName: hourly-backups
+            TargetBackupVault: !Ref TheBackupVault
+            ScheduleExpression: cron(0 0-4,8-23 ? * * *)
+            StartWindowMinutes: 60
+            Lifecycle:
+              DeleteAfterDays: 30
+      BackupPlanTags: 
+        Key: AWS Starter-Kit-Name
+        Value: Windows-Migration
+  BackupPlanRole:
+    Type: AWS::IAM::Role
+    Properties: 
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal: 
+              Service: 
+                - "backup.amazonaws.com"
+            Action: 
+              - "sts:AssumeRole"
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSBackupServiceRolePolicyForBackup"  
+      Tags: 
+        - Key: AWS Starter-Kit-Name
+          Value: Windows-Migration
+  TheMonthlyBackupPlanSelection:
+    Type: AWS::Backup::BackupSelection
+    Properties:
+      BackupPlanId: !Ref TheMonthlyBackupPlan
+      BackupSelection: 
+        SelectionName: !Sub ${AWS::StackName}servers-to-backup-monthly
+        IamRoleArn: !GetAtt BackupPlanRole.Arn
+        ListOfTags:
+          - ConditionType: STRINGEQUALS
+            ConditionKey: BackupRequirement
+            ConditionValue: BackupRequired
+  TheHourlyBackupPlanSelection:
+    Type: AWS::Backup::BackupSelection
+    Properties:
+      BackupPlanId: !Ref TheHourlyBackupPlan
+      BackupSelection: 
+        SelectionName: !Sub ${AWS::StackName}servers-to-backup-hourly
+        IamRoleArn: !GetAtt BackupPlanRole.Arn
+        ListOfTags:
+          - ConditionType: STRINGEQUALS 
+            ConditionKey: BackupRequirement
+            ConditionValue: BackupRequired 
+# This is the cloudwatch dashboard. Sets up gauges for VPN connectivity, CPU utilization and Disk throughput and IOPS on the file server. 
+  TheDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub ${AWS::StackName}-performance-dashboard
+      DashboardBody: !Sub | 
+        {
+          "widgets": [
+            {
+              "height": 6,
+              "width": 24,
+              "y": 6,
+              "x": 0,
+              "type": "metric",
+              "properties": {
+                "view": "gauge",
+                "metrics": [
+                  [ "AWS/EC2", "CPUUtilization", "InstanceId", "${domainController1}" ],
+                  [ "...", "${domainController2}" ],
+                  [ "...", "${fileServer1}" ]
+                ],
+                "region": "${AWS::Region}",
+                "yAxis": {
+                  "left": {
+                    "min": 10,
+                    "max": 100
+                }
+                },
+                "annotations": {
+                  "horizontal": [
+                    {
+                      "color": "#FFFF00",
+                      "label": ">50%",
+                      "value": 50,
+                      "fill": "above"
+                    },
+                    {
+                      "color": "#d62728",
+                      "label": ">65%",
+                      "value": 65,
+                      "fill": "above"
+                    }
+                  ]
+                },
+                "title": "CPU-Utilization-VPC-Windows-Servers"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 0,
+              "width": 6,
+              "height": 6,
+              "properties": {
+                "view": "gauge",
+                "metrics": [
+                  [ "AWS/VPN", "TunnelState", "VpnId", "${theVpnConnection}"]
+                ],
+                "region": "${AWS::Region}",
+                "yAxis": {
+                  "left": {
+                    "min": 0,
+                    "max": 1
+                  }
+                },
+                "liveData": true,
+                "title": "VPN Tunnel State"
+              }
+            },
+            {
+              "height": 6,
+              "width": 12,
+              "y": 12,
+              "x": 0,
+              "type": "metric",
+              "properties": {
+                "view": "gauge",
+                "metrics": [
+                  [ "AWS/EBS", "VolumeWriteOps", "VolumeId", "${Fs1DDrive}" ],
+                  [ ".", "VolumeReadOps", ".", "." ]
+                  ],
+                "region": "us-east-1",
+                "title": "${VpcFs1Name} File Share Volume IOPS",
+                "yAxis": {
+                  "left": {
+                    "min": 1,
+                    "max": 3000
+                  }
+                },
+                "annotations": {
+                  "horizontal": [
+                    {
+                      "color": "#2ca02c",
+                      "value": 1800,
+                      "fill": "below"
+                    },
+                    [
+                      {
+                        "color": "#f89256",
+                        "value": 1800
+                      },
+                      {
+                        "value": 2550
+                      }
+                    ],
+                      {
+                        "color": "#d62728",
+                        "value": 2550,
+                        "fill": "above"
+                      }
+                  ]
+                }
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12,
+              "y": 12,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "view": "gauge",
+                "metrics": [
+                  [ "AWS/EBS", "VolumeWriteBytes", "VolumeId", "${Fs1DDrive}" ],
+                  [ ".", "VolumeReadBytes", ".", "." ]
+                ],
+                "region": "us-east-1",
+                "yAxis": {
+                  "left": {
+                    "min": 1,
+                    "max": 125000000
+                  }
+                },
+                "annotations": {
+                  "horizontal": [
+                    {
+                      "color": "#2ca02c",
+                      "value": 75000000,
+                      "fill": "below"
+                    },
+                    [
+                      {
+                        "color": "#f89256",
+                        "value": 75000000
+                      },
+                      {
+                        "value": 100000000
+                      }
+                    ],
+                      {
+                        "color": "#d62728",
+                        "value": 100000000,
+                        "fill": "above"
+                      }
+                    ]
+                },
+                "title": "VPC-FS01 File Share Volume Throughput"
+              }
+            }
+          ]
+        }
+# Cloudwatch alarms for various alarm states.
+  AlarmForFailedBackups: 
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: "This alarm means that a backup job has failed. Refer to the AWS Backup Console for more details."
+      ActionsEnabled: true
+      OKActions: []
+      AlarmActions:
+        - !GetAtt AlarmsSnsTopic.TopicArn
+      InsufficientDataActions: []
+      MetricName: NumberOfBackupJobsFailed
+      Namespace: AWS/Backup
+      Statistic: Sum
+      Dimensions:
+        - Name: BackupVaultName
+          Value: !GetAtt TheBackupVault.BackupVaultName
+      Period: 300
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: ignore
+  AlarmForDc01FailedSystemCheck: 
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: "This alarm means that this EC2 instance has failed a system check."
+      ActionsEnabled: true
+      OKActions: []
+      AlarmActions:
+        - !GetAtt AlarmsSnsTopic.TopicArn
+      InsufficientDataActions: []
+      MetricName: StatusCheckFailed_System
+      Namespace: AWS/EC2
+      Statistic: Average
+      Dimensions:
+        - Name: InstanceId
+          Value: !Ref domainController1
+      Period: 300
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: missing
+  AlarmForDc02FailedSystemCheck:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: "This alarm means that this EC2 instance has failed a system check."
+      ActionsEnabled: true
+      OKActions: []
+      AlarmActions:
+        - !GetAtt AlarmsSnsTopic.TopicArn
+      InsufficientDataActions: []
+      MetricName: StatusCheckFailed_System
+      Namespace: AWS/EC2
+      Statistic: Average
+      Dimensions:
+        - Name: InstanceId
+          Value: !Ref domainController2
+      Period: 300
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: missing
+  AlarmForFs01FailedSystemCheck:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: "This alarm means that this EC2 instance has failed a system check."
+      ActionsEnabled: true
+      OKActions: []
+      AlarmActions:
+        - !GetAtt AlarmsSnsTopic.TopicArn
+      InsufficientDataActions: []
+      MetricName: StatusCheckFailed_System
+      Namespace: AWS/EC2
+      Statistic: Average
+      Dimensions:
+        - Name: InstanceId
+          Value: !Ref fileServer1
+      Period: 300
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: missing
+  AlarmForFs01IopsThreshold: 
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: "This alarm means that the Read Operations for the File Server
+        Disk has been over 2400 for 15 minutes. The standard Disk throughput
+        configuration for Disk IOPS is 3000. Thjis alarm may indicate a need to
+        increase IOPS for the Volume. Refer to the Cloudwatch Dashboard to see
+        history graph. "
+      ActionsEnabled: true
+      OKActions: []
+      AlarmActions:
+        - !GetAtt AlarmsSnsTopic.TopicArn
+      InsufficientDataActions: []
+      MetricName: VolumeReadOps
+      Namespace: AWS/EBS
+      Statistic: Average
+      Dimensions:
+        - Name: VolumeId
+          Value: !GetAtt Dc1DDrive.VolumeId
+      Period: 300
+      EvaluationPeriods: 3
+      DatapointsToAlarm: 3
+      Threshold: 2400
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: missing
+##### The below script is a cleanup script. It removes the allow all traffic outbound rule from the default security group. This has a dependency on VPC, 
+##### in future releases we will add a Delete event which will delete any ENIs and SGs created by AD Connector or Workspaces that dont get removed by CF by default.
+  Cleanup: 
+    Type: Custom::Cleanup
+    DependsOn: vpc
+    Properties: 
+      ServiceToken: !GetAtt CleanupLambdaFunction.Arn 
+  CleanupLambdaExecutionRole:
+    Metadata:
+      checkov:
+        skip:
+          - id: "CKV_AWS_111"
+            comment: "This action does not support resource-level permissions. Policies granting access must specify * in the resource element."
+      cfn_nag: 
+        rules_to_suppress: 
+          - id: W11
+            reason: "This action does not support resource-level permissions. Policies granting access must specify * in the resource element."
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: "/"
+      Policies:
+        - PolicyName: Windows-Starter-Kit-Cleanup-Lambda-Policy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: arn:aws:logs:*:*:*
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeSecurityGroups
+                  - ec2:DescribeSecurityGroupRules
+                  - ec2:RevokeSecurityGroupEgress
+                  - ec2:RevokeSecurityGroupIngress
+                  - ce:UpdateCostAllocationTagsStatus
+                  - ce:GetTags
+                Resource: "*"
+  CleanupLambdaFunction:
+    Metadata:
+      checkov:
+        skip: 
+          - id: "CKV_AWS_115"
+            comment: "This Lambda function is a Lambda Backed custom resource that runs only once."
+          - id: "CKV_AWS_116"
+            comment: "No SNS Topic Required, Lambda Backed custom resource that runs only once."
+          - id: "CKV_AWS_117"
+            comment: "No requirement to run inside a VPC, Lambda Backed custom resource that runs only once."
+      cfn_nag: 
+        rules_to_suppress: 
+          - id: W89
+            reason: "No requirement to run inside a VPC, Lambda Backed custom resource that runs only once."
+          - id: W92
+            reason: "No requirement to run inside a VPC, Lambda Backed custom resource that runs only once."
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: This Lambda function does post deployment cleanup tasks. 
+      FunctionName: cleanup-lambda-function
+      Runtime: python3.12
+      Timeout: 15
+      Environment: 
+        Variables: 
+          selectedRegion: 
+            Fn::Sub: "${AWS::Region}" 
+      KmsKeyArn: !GetAtt TheKmsKey.Arn
+      Role: !GetAtt CleanupLambdaExecutionRole.Arn
+      Handler: index.lambda_handler
+      Code: 
+        ZipFile: |
+          import boto3
+          import os
+          import cfnresponse 
+
+          def lambda_handler(event, context):
+              response_data = {}
+              if event['RequestType'] == 'Create':
+                revoke_default_sg_rules()
+
+              elif event['RequestType'] == 'Update':
+                pass
+              elif event['RequestType'] == 'Delete':
+                pass
+              cfnresponse.send(event, context, cfnresponse.SUCCESS, response_data)
+
+          def revoke_default_sg_rules():
+              # Python function to revoke allowall egreess rule in Default Security Group
+              client = boto3.client('ec2') #creates a boto3 client object
+              dsg_response = client.describe_security_groups(
+                  Filters=[
+                      {
+                         'Name': 'group-name',
+                         'Values': ['default']
+                      },
+                  ],
+              )
+              sg_id = dsg_response['SecurityGroups'][0]['GroupId']
+              dsgr_response = client.describe_security_group_rules(
+                  Filters=[
+                      {
+                          'Name': 'group-id',
+                          'Values': [sg_id]
+                      },
+                  ]
+              )
+              for rules in dsgr_response['SecurityGroupRules']:
+                  if rules['IsEgress'] == True:
+                      client.revoke_security_group_egress(
+                          GroupId=sg_id,
+                          SecurityGroupRuleIds=[rules['SecurityGroupRuleId']]
+                      )
+                  elif rules['IsEgress'] == False:
+                      client.revoke_security_group_ingress(
+                      GroupId=sg_id,
+                      SecurityGroupRuleIds=[rules['SecurityGroupRuleId']]
+                  )
+##### These are the outputs that add-on kits will import values from.
+Outputs:
+  StackVpc:
+    Description: The VPC ID of the VPC created by this stack
+    Value: !Ref vpc
+    Export:
+      Name: "Windows-Domain-VPC-ID"
+  StackKmsKeyAlias: 
+    Description: The KMS Key Alias that can be used for all the Windows Domain operations in this account. 
+    Value: !Ref TheKmsKeyAlias
+    Export: 
+      Name: "KMS-Key-Alias"
+  PublicSubnet1:
+    Description: The Subnet ID of Public Subnet 1
+    Value: !Ref subnetPublic1
+    Export:
+      Name: "Windows-Domain-Public-Subnet-1-ID"
+  DomainControllerSubnet1:
+    Description: The Subnet ID of the first subnet for domain controllers created by this stack
+    Value: !Ref subnetPrivate1
+    Export:
+      Name: "Windows-Domain-DC-Subnet1-ID"
+  DomainControllerSubnet2:
+    Description: The Subnet ID of the second subnet for domain controllers created by this stack
+    Value: !Ref subnetPrivate2
+    Export:
+      Name: "Windows-Domain-DC-Subnet2-ID"
+  ServersandClientsSubnet1:
+    Description: The Subnet ID of the first subnet for Windows Servers and clients created by this stack
+    Value: !Ref subnetPrivate3
+    Export:
+      Name: "Windows-Domain-Client-Subnet-1-ID"
+  ServersandClientsSubnet2:
+    Description: The Subnet ID of the first subnet for Windows Servers and clients created by this stack
+    Value: !Ref subnetPrivate4
+    Export:
+      Name: "Windows-Domain-Client-Subnet-2-ID"
+  WindowsDomainName:
+    Description: The Windows Domain Name supplied by the stack administrator at stack creation
+    Value: !Ref OnPremDomainName
+    Export:
+      Name: "Windows-Domain-Name"
+  DomainController1IP:
+    Description: The IP Address of Domain Controller 1
+    Value: !Ref VpcDc1Ip
+    Export:
+      Name: "Windows-Domain-DC1-IP"
+  DomainController2IP:
+    Description: The IP Address of Domain Controller 2
+    Value: !Ref VpcDc2Ip 
+    Export:
+      Name: "Windows-Domain-DC2-IP"
+  DomainController1Name:
+    Description: The Computer Name of Domain Controller 1
+    Value: !Ref VpcDc1Name
+    Export:
+      Name: "Windows-Domain-DC1-Name"
+  DomainController2Name:
+    Description: The Computer Name of Domain Controller 2
+    Value: !Ref VpcDc2Name
+    Export:
+      Name: "Windows-Domain-DC2-Name"
+  FileServer1Name:
+    Description: The Computer Name of File Server 1
+    Value: !Ref VpcFs1Name
+    Export:
+      Name: "Windows-Domain-FS1-Name"
+  DomainController1InstanceId:
+    Description: The Instance ID of Domain Controller 1
+    Value: !Ref domainController1
+    Export:
+      Name: "Windows-Domain-DC1-Instance-Id"
+  DomainController2InstanceId:
+    Description: The Instance ID of Domain Controller 2
+    Value: !Ref domainController2
+    Export:
+      Name: "Windows-Domain-DC2-Instance-Id"
+  FileServer1InstanceId:
+    Description: The Instance ID of File Server 1
+    Value: !Ref fileServer1
+    Export:
+      Name: "Windows-Domain-FS1-Instance-Id"
+  AlertsSnsTopic:
+    Description: The SNS Topic which handles alerting for this deployment
+    Value: !Ref AlarmsSnsTopic
+    Export:
+      Name: "Windows-Domain-SNS-Topic"
