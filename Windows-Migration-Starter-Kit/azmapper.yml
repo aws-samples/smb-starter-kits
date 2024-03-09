@@ -164,7 +164,7 @@ Resources:
                   azlist = random.sample(ws_az_ids, num_azs)
               else: 
                   return
-              
+              n=0
               for azId in azlist: 
                   ec2client = boto3.client('ec2')
                   ec2_response = ec2client.describe_availability_zones(
@@ -176,11 +176,12 @@ Resources:
                       ]
                   )
                   for i in ec2_response['AvailabilityZones']:
+                      n=n+1
                       azId = i['ZoneId']
                       azName = i['ZoneName']
                       ssmclient = boto3.client('ssm')   
                       ssmclient.put_parameter(
-                          Name='azmap-'+azId,
+                          Name='azmap-az'+str(n),
                           Type='String',
                           Value=azName,
                           Overwrite=True,
