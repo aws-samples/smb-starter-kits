@@ -17,8 +17,7 @@
 #
 AWSTemplateFormatVersion: 2010-09-09
 Description: > 
-  Creates an AZ Map so that the correct availability zones can be chosen by the 
-  Windows Migration Starter Kit. 
+  Creates an AZ Map which is required for various operability of Windows Migration Starter Kit and add-on kits. 
 Resources:
 # Lambda function invoker
   AzMapper: 
