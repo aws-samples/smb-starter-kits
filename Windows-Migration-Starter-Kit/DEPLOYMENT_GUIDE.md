@@ -90,12 +90,7 @@ the scope of this document. While this Starter Kit deploys the member
 server as a file server, you could use the server for any role you
 needed if necessary.
 
-[]{#sharedresp .anchor}Please refer to the AWS Shared responsibility
-model to learn more about the security of the resources deployed with
-this Starter Kit. While AWS is responsible for the security ***OF*** the
-cloud (security of the physical datacenters, physical network, physical
-storage, and hypervisors), the Partner and Customer are responsible for
-the security ***IN*** the cloud. Basic Principles of Security in the
+Please refer to the AWS Shared responsibilit model to learn more about the security of the resources deployed with this Starter Kit. While AWS is responsible for the security ***OF*** the cloud (security of the physical datacenters, physical network, physical storage, and hypervisors), the Partner and Customer are responsible forthe security ***IN*** the cloud. Basic Principles of Security in the
 cloud are (but not limited to):
 
 -   Amazon EC2 Instance Operating Systems should be updated as updates
@@ -140,36 +135,50 @@ acceptable, you can leave the inputs at their defaults. For the example
 migration in this document, the defaults will be used with a Windows
 Domain name mypoc.link.
 
-**Important Note!**
+**Important Note about Virtual Desktops Forward Compatibility**
 
-AWS Workspaces is a virtual desktop
-solution that can be integrated with this Starter-Kit as an add-on.
-However, please note that WORKSPACES IS AVAILABLE IN THE US-WEST-2
-(Oregon), CANADA-CENTRAL-1, and US-EAST-1 (N. VIRGINIA) REGIONS. It is
-recommended that this Starter-Kit is ONLY deployed in either of those 2
-regions for Workspaces Add-On compatibility. For more information on
-Workspaces and Regional Availability please see
-<https://docs.aws.amazon.com/workspaces/latest/adminguide/azs-workspaces.html>
+Amazon WorkSpaces enables you to provision virtual, cloud-based Microsoft Windows, Amazon Linux, or Ubuntu Linux desktops for your users, known as WorkSpaces. WorkSpaces eliminates the need to procure and deploy hardware or install complex software. You can quickly add or remove users as your needs change. Users can access their virtual desktops from multiple devices or web browsers.
+
+This starter kit is forward compatible with Amazon WorkSpaces. Deploying AZMapper first ensures this 
+compatibility so that the Windows Migration Starter Kit deploys in the correcft Availability Zones for you. However, in order to use WorkSpaces with this kit, you must deploy this template in a region where Amazon WorkSpaces is available. Those regions are:
+
+- US East (N.Virginia) us-east-1
+- US West (Oregon) us-west-2
+- Asia Pacific (Mumbai) ap-south-1
+- Asia Pacific (Seoul) ap-northeast-2
+- Asia Pacific (Singapore) ap-southeast-1
+- Asia Pacific (Sydney) ap-southeast-2
+- Asia Pacific (Tokyo) ap-northeast-1
+- Canada (Central) ca-central-1
+- Europe (Frankfurt) eu-central-1
+- Europe (Ireland) eu-west-1
+- Europe (London) eu-west-2
+- South America (Sao Paulo) sa-east-1
+- Africa (Cape Town) af-south-1
+- Israel (Tel Aviv) il-central-1
+
+You may deploy this Starter Kit in any region; however if you deploy the kit in a region without WorkSpaces and wish to add WorkSpaces later, you will need additional components that will have to be set
+up manually, such as VPC peering, and additional domain controllers. 
 
 ## Deployment
 
 **Prior to beginning the migration, it is imperative that:**
 
--   **Windows time is set correctly on the existing domain controller
+-   Windows time is set correctly on the existing domain controller
     and is synced and working properly in the Windows domain**
 
--   **DNS is tested and working properly**
+-   DNS is tested and working properly**
 
--   **The health of the on-premise domain has been verified with a tool
+-   The health of the on-premise domain has been verified with a tool
     such as Windows dcdiag.exe.**
 
--   **Windows Firewall should be configured to allow all AD
+-   Windows Firewall should be configured to allow all AD
     Communication between domain controllers.**
 
-**If there are any issues with Time, DNS, Network Connectivity, or
-Domain Controller health, you may have problems with the migration.**
+If there are any issues with Time, DNS, Network Connectivity, or
+Domain Controller health, you may have problems with the migration.
 
-[]{#deploymentstep1 .anchor}**Step 1) Gather the required information
+**Step 1) Gather the required information**
 necessary to migrate your domain. (5 minutes)**
 
 a)  CIDR Block of on-premises network
