@@ -4085,7 +4085,12 @@ Outputs:
     Description: The KMS Key Alias that can be used for all the Windows Domain operations in this account. 
     Value: !Ref TheKmsKeyAlias
     Export: 
-      Name: "KMS-Key-Alias"
+      Name: "Windows-Domain-KMS-Key-Alias"
+  StackKmsKeyArn: 
+    Description: The KMS Key Alias that can be used for all the Windows Domain operations in this account. 
+    Value: !GetAtt TheKmsKey.Arn
+    Export: 
+      Name: "Windows-Domain-KMS-Key-Arn"
   PublicSubnet1:
     Description: The Subnet ID of Public Subnet 1
     Value: !Ref subnetPublic1
