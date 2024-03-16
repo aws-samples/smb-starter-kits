@@ -33,7 +33,7 @@ C:\\Users\\Administrator\>net start w32time
 
 Documentation on the Windows time service can be found here:
 
-https://learn.microsoft.com/en-us/windows-server/networking/windows-time-service/windows-time-service-tools-and-settings?tabs=config
+<https://learn.microsoft.com/en-us/windows-server/networking/windows-time-service/windows-time-service-tools-and-settings?tabs=config>
 
 **Section 2) Windows Firewall**
 
@@ -68,25 +68,22 @@ Enabling ICMP in Windows can be done via Active Directory Group Policy
 (best practice) or via the Windows Defender firewall on individual
 instances. Refer to these articles on how to enable ICMP in Windows:
 
-https://learn.microsoft.com/en-us/windows/security/operating-system-security/network-security/windows-firewall/create-an-inbound-icmp-rule
+<https://learn.microsoft.com/en-us/windows/security/operating-system-security/network-security/windows-firewall/create-an-inbound-icmp-rule>
 
 <https://learn.microsoft.com/en-us/troubleshoot/windows-server/identity/config-firewall-for-ad-domains-and-trusts>
 
-**Section 3) VPC and Security Group Troubleshooting**
+**Section 3) VPC Network Troubleshooting**
 
-If you suspect that a Security group may be causing connectivity issues,
-there are 3 different approaches to troubleshooting:
+If you are experiencing connectivity issues, try the following:
 
-a.  Create a Security Group which allows all traffic from 0.0.0.0/0,
-    remove the security groups that are attached to the instance, and
-    attach the "allow all" security group, then test your application.
-    While this solves the problem of "is a security group the reason for
-    my application breaking?", it does not solve the problem of allowing
-    the application while adhering to the principle of least
-    access/least privilege. It is highly recommended that this approach
-    is only used in a test environment, and that there are controls in
-    place to ensure that the original Security groups are restored to
-    the instance you are testing.
+a.  Check the VPC route tables to ensure that no routes have a status of
+    "Blackhole". This should be looked at first when connectivity is not
+    working between the on-prem environment and the VPC where, on rare
+    occasions, the VPC route tables may be created before completion of
+    the VPN Gateway attachment during stack creation. If this is the
+    case, detaching and re-attaching the VPN gateway will fix the issue.
+
+> ![](./tg_imgs/media/image3.png)
 
 b.  Enable VPC Flow logs, and examine the log files to find
     port/protocol packets that match your application. Documentation for
@@ -94,14 +91,10 @@ b.  Enable VPC Flow logs, and examine the log files to find
 
 > <https://docs.aws.amazon.com/vpc/latest/userguide/flow-logs.html>
 
-c.  Enable VPC Mirroring, which sends a copy of all packets in and out
-    of a network interface attached to an instance to a target instance
-    where the packet capture data is ingested, and can be analyzed on
-    the instance or downloaded to a computer running your preferred
-    packet capture software for analysis. Documentation for VPC Traffic
-    Mirroring can be found here:
-
-> <https://docs.aws.amazon.com/vpc/latest/mirroring/traffic-mirroring-getting-started.html>
+c.  Ask Amazon Q. For example, ask Amazon Q "Why can't I RDP from my
+    on-premise network to VPC-DC01?" and Amazon Q will configure a VPC
+    reachability analysis for that network path and run it, telling you
+    where the issue is, if there is one.
 
 **Section 4) DNS**
 
@@ -125,7 +118,7 @@ In the below example, we opened the nslookup utility, queried each
 domain controller to make sure each domain controller had a host record
 of the other domain controller in DNS.
 
-> ![](./tg_imgs/media/image3.png)
+> ![](./tg_imgs/media/image4.png)
 
 If you see an error when running the server command in nslookup, i.e.
 connecting to server 192.168.100.10 times out, try restarting the DNS
@@ -147,7 +140,7 @@ created. Refer to the following article on AD replication concepts here:
 
 <https://learn.microsoft.com/en-us/windows-server/identity/ad-ds/get-started/replication/active-directory-replication-concepts>
 
-**Section 6) Testing**
+**Section 6) Testing Migration.**
 
 This bundle was tested using virtual machines to simulate an on-premise
 workload consisting of a domain controller, file server and a windows
