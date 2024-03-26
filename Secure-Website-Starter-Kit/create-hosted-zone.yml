@@ -1,0 +1,64 @@
+## Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy of this
+# software and associated documentation files (the "Software"), to deal in the Software
+# without restriction, including without limitation the rights to use, copy, modify,
+# merge, publish, distribute, sublicense, and/or sell copies of the Software, and to
+# permit persons to whom the Software is furnished to do so.
+#
+# Sample code, software libraries, command line tools, proofs of concept, templates, or other related technology are provided as 
+# AWS Content or Third-Party Content under the AWS Customer Agreement, or the relevant written agreement between you and AWS
+# (whichever applies). You should not use this AWS Content or Third-Party Content in your production accounts, or on production or 
+# other critical data. You are responsible for testing, securing, and optimizing the AWS Content or Third-Party Content, such as 
+# sample code, as appropriate for production grade use based on your specific quality control practices and standards. Deploying AWS 
+# Content or Third-Party Content may incur AWS charges for creating or using AWS chargeable resources, such as running Amazon EC2 
+# instances or using Amazon S3 storage.
+AWSTemplateFormatVersion: 2010-09-09
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - 
+        Label:
+          default: REQUIRED Configuration Information
+        Parameters:
+          - ZoneDomainName
+# Creates Hosted Zone in Route 53
+Description: This is the Route 53 Public Hosted Zone. Refer to the outputs tab for the Zone ID and NameServers configuration.
+Parameters:
+  ZoneDomainName:
+    Description: Enter the Public Routable Domain Name.
+    Type: String
+    MinLength: 2
+    MaxLength: 80
+    AllowedPattern: '^(\*\.)?(((?!-)[A-Za-z0-9-]{0,62}[A-Za-z0-9])\.)+((?!-)[A-Za-z0-9-]{1,62}[A-Za-z0-9])$'
+    Default: myregistereddomain.com
+Resources:
+  TheHostedZone:
+    Type: AWS::Route53::HostedZone
+    Properties: 
+      Name: !Ref ZoneDomainName
+Outputs:
+  ExportedHostedZoneId:
+    Description: > 
+      This is the Hosted Zone ID which will be required when you create Certificates in Certificate Manager 
+      or when you create a web site using the Secure-Website-Starter-Kit.
+    Value: !Ref TheHostedZone
+    Export: 
+      Name: !Join 
+        - "-"
+        - - !Select [0, !Split [".", !Ref ZoneDomainName]]
+          - !Select [1, !Split [".", !Ref ZoneDomainName]]
+          - ZoneId
+  ZoneNameServers:
+    Description: > 
+      These are the NameServers for your hosted zone. 
+      Update the Namservers for the domain at your domain registrar's web site. 
+      If you registered the domain in Route 53, in the Route 53 console, click on Regsistered domains, click the domain. 
+      In the Details section, click Actions, then click Edit nameservers. 
+    Value: !Join 
+      - ","
+      -  !GetAtt TheHostedZone.NameServers
+    Export: 
+      Name: !Sub ${AWS::StackName}-Nameservers
+

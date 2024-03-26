@@ -1,0 +1,588 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy of this
+# software and associated documentation files (the "Software"), to deal in the Software
+# without restriction, including without limitation the rights to use, copy, modify,
+# merge, publish, distribute, sublicense, and/or sell copies of the Software, and to
+# permit persons to whom the Software is furnished to do so.
+#
+# CloudFormation template for a secure static website hosted in CloudFront
+# Sample code, software libraries, command line tools, proofs of concept, templates, or other related technology are provided as 
+# AWS Content or Third-Party Content under the AWS Customer Agreement, or the relevant written agreement between you and AWS
+# (whichever applies). You should not use this AWS Content or Third-Party Content in your production accounts, or on production or 
+# other critical data. You are responsible for testing, securing, and optimizing the AWS Content or Third-Party Content, such as 
+# sample code, as appropriate for production grade use based on your specific quality control practices and standards. Deploying AWS 
+# Content or Third-Party Content may incur AWS charges for creating or using AWS chargeable resources, such as running Amazon EC2 
+# instances or using Amazon S3 storage.
+AWSTemplateFormatVersion: 2010-09-09
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - 
+        Label:
+          default: REQUIRED Configuration Information
+        Parameters:
+          - siteDomainName
+          - dnsHosting
+          - theHostedZoneId
+          - hostOrAliasName
+          - createZoneApex
+          - defaultPage
+          - errorPage
+          - logForDays
+          - functionality
+          - priceConfig
+      - 
+        Label:
+          default: The below fields are for template functionality, do not change the values.
+        Parameters: 
+          - postList 
+          - noPostList
+Description: This stack deploys all components for a secure static website in CloudFront. 
+Rules:
+  DeployRule:
+    Assertions:
+      - Assert: !Equals
+        - !Ref AWS::Region
+        - us-east-1
+        AssertDescription: |
+          Certificates can only be issued by Certificate Manager in us-east-1. This solution must be deployed in the us-east-1 region.
+      - Assert: !Equals 
+        - !Ref dnsHosting 
+        - -Route53-
+        AssertDescription: |
+          Please use the Secure-Website-With-Third-Party-DNS template when third-party DNS services are required. Refer to 
+          the Deployment guide for more information.
+Parameters:
+  siteDomainName:
+    Description: Enter the Public Routable Domain Name for the website. LOWER CASE LETTERS ONLY.
+    Type: String
+    MinLength: 3
+    MaxLength: 80
+    AllowedPattern: '^(\*\.)?(((?!-)[a-z0-9-]{0,62}[a-z0-9])\.)+((?!-)[a-z0-9-]{1,62}[a-z0-9])$'
+    Default: myregistereddomain.com
+  dnsHosting: 
+    Description: >
+      Where is DNS for the domain hosted? 
+    Type: String 
+    AllowedValues: 
+      - -Route53-
+      - -Third-Party-
+    Default: -Route53-
+  hostOrAliasName:
+    Description: > 
+      This is the hostname or alias name of the website. Do not use any periods. For example, if you wish to publish the website 
+      www.myregistereddomain.com, enter www here. LOWER CASE LETTERS ONLY.
+    Type: String
+    MinLength: 3
+    MaxLength: 80
+    AllowedPattern: ^[a-z0-9]+$
+    Default: www
+  createZoneApex:
+    Description: > 
+      Would you like to create a zone apex record for the domain? i.e. users who browse to only your domain name 
+      will be directed to the website. For Example, setting this to true allows visitors to see your web site by navigating to 
+      www.yourdomain.com OR by naviagating to just yourdomain.com.
+    Type: String 
+    AllowedValues:
+      - Yes
+      - No 
+    Default: Yes
+  logForDays:
+    Description: The amount of days log files are retained. 
+    Type: String
+    MinLength: 1
+    MaxLength: 4
+    AllowedPattern: ^[0-9]+$
+    Default: 14
+  functionality:
+    Description: > 
+      What functionality does this website require? No-Post is for web sites that don't have any kind of forms or require any 
+      kind of uploads of data. Post-Required is for websites which have forms or require data uploads. 
+    Type: String
+    AllowedValues:
+      - No-Post
+      - Post-Required
+    Default: No-Post 
+  priceConfig:
+    Description: > 
+      This setting sets which regions you will serve your website from. It will be accessible worldwide no matter which setting 
+      you choose, however, each region has different data transfer out costs. This setting dictates which regions your site will be 
+      cached in; thus dictaing your data transfer out cost. NOTE: The CloudFront Monthly Free Tier is Worldwide. 
+      All - uses all edge nodes worldwide, with each region having a different Data Transfer Out charge.
+      NA-EUR - Only uses North America and Europe Edge nodes at a cost of .085 per GB. 
+      NA-EUR-ME-AFR-ASIA - Only uses North America and Europe (.085 per GB), Middle East and Africa (.11 per GB) And Asia (.12 per GB).
+      For more information visit https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/PriceClass.html
+    Type: String
+    AllowedValues: 
+      - All
+      - NA-EUR
+      - NA-EUR-ME-AFR-ASIA
+    Default: NA-EUR 
+  defaultPage:
+    Description: The default page that visitors to your website should see. Usually, this is index.html. LOWER CASE LETTERS ONLY.
+    Type: String
+    MinLength: 3
+    MaxLength: 25
+    AllowedPattern: ^[a-z0-9.]+$
+    Default: index.html
+  errorPage:
+    Description: > 
+      The error page that visitors to your website should see when there is a 4xx error. Usually, this is error.html. 
+      This is a generic error page, if you want individual error pages for each error, you can add them in CloudFront. 
+      LOWER CASE LETTERS ONLY.
+    Type: String
+    MinLength: 3
+    MaxLength: 25
+    AllowedPattern: ^[a-z0-9.]+$
+    Default: error.html
+  theHostedZoneId:
+    Description: > 
+      This is the Zone ID of the Route 53 Hosted Zone for the domain. If the Route 53 hosted zone was created with the included 
+      CloudFormation template, you can find the Hosted Zone ID in the Outputs Tab of the stack. If the hosted zone was created 
+      manually, you can find the Hosted Zone ID by navigating to the Route 53 console, click on hosted zones, 
+      click on the hosted zone for the doain you are using for this website, and click the arrow next to Hosted zone details 
+      at the top of the page.
+    Type: String
+    MinLength: 3
+    MaxLength: 24
+    AllowedPattern: ^[A-Z0-9]+$
+    Default: HOSTEDZONEID
+  postList:
+    Type: List<String>
+    Description: This is a template helper field. Do not change this field.
+    Default: GET,HEAD,OPTIONS,PUT,POST,PATCH,DELETE
+  noPostList:
+    Type: List<String>
+    Description: This is a template helper field. Do not change this field.
+    Default: GET,HEAD,OPTIONS
+Conditions:
+  zoneApexRequired: !Equals
+    - !Ref createZoneApex 
+    - yes
+  priceClass100: !Equals
+    - !Ref priceConfig 
+    - NA-EUR
+  priceClass200: !Equals
+    - !Ref priceConfig
+    - NA-EUR-ME-AFR-ASIA
+  priceClassAll: !Equals
+    - !Ref priceConfig
+    - All
+  sitePostRequired: !Equals
+    - !Ref functionality
+    - Post-Required 
+Resources:
+  TheS3OriginBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub ${hostOrAliasName}.${siteDomainName}-website-files
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      VersioningConfiguration: 
+        Status: Enabled
+      LoggingConfiguration: 
+        DestinationBucketName: !Ref TheS3LoggingBucket
+        LogFilePrefix: "s3-origin-access-logs/"
+      PublicAccessBlockConfiguration: 
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+  TheS3LoggingBucket:
+    Type: AWS::S3::Bucket
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W35
+            reason: "This is the S3 Logging Bucket"
+    Properties:
+      BucketName: !Sub ${hostOrAliasName}.${siteDomainName}-website-log-files
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      VersioningConfiguration: 
+        Status: Enabled
+      PublicAccessBlockConfiguration: 
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: ObjectWriter
+      AccessControl: LogDeliveryWrite
+      LifecycleConfiguration: 
+        Rules: 
+          - Id: ExpireFiles
+            Status: Enabled
+            ExpirationInDays: !Ref logForDays
+  TheSSLCert:
+    Type: AWS::CertificateManager::Certificate
+    Properties: 
+      DomainName: !Join [".", [!Ref hostOrAliasName, !Ref siteDomainName]]
+      SubjectAlternativeNames:
+        - !If [zoneApexRequired, !Ref siteDomainName, !Ref AWS::NoValue]
+      DomainValidationOptions:
+        - DomainName: !Join [".", [!Ref hostOrAliasName, !Ref siteDomainName]]
+          HostedZoneId: !Ref theHostedZoneId
+        - DomainName: !If [zoneApexRequired, !Ref siteDomainName, AWS::NoValue]
+          HostedZoneId: !If [zoneApexRequired, !Ref theHostedZoneId, AWS::NoValue]
+      ValidationMethod: DNS 
+  TheOac:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub ${AWS::StackName}-OAC
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+  TheCloudfrontDist:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Aliases: 
+          - !Join [".", [!Ref hostOrAliasName, !Ref siteDomainName]]
+          - !If [zoneApexRequired, !Ref siteDomainName, !Ref "AWS::NoValue"]
+        Origins:
+          - DomainName: !GetAtt TheS3OriginBucket.DomainName
+            Id: !Sub ${AWS::StackName}-S3Origin
+            S3OriginConfig:
+              OriginAccessIdentity: ""
+            OriginAccessControlId: !GetAtt TheOac.Id
+        Logging: 
+          Bucket: !GetAtt TheS3LoggingBucket.DomainName
+          IncludeCookies: false
+          Prefix: "cf-dist-logs"
+        DefaultCacheBehavior:
+          AllowedMethods: 
+            !If [sitePostRequired, !Ref postList, !Ref noPostList]
+          TargetOriginId: !Sub ${AWS::StackName}-S3Origin
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
+          ViewerProtocolPolicy: redirect-to-https
+        ViewerCertificate:
+          AcmCertificateArn: !Ref TheSSLCert
+          MinimumProtocolVersion: TLSv1.2_2021
+          SslSupportMethod: sni-only
+        DefaultRootObject: !Ref defaultPage
+        CustomErrorResponses: 
+          - ErrorCode: 400
+            ResponseCode: 400
+            ResponsePagePath: !Sub /${errorPage}
+          - ErrorCode: 403
+            ResponseCode: 403
+            ResponsePagePath: !Sub /${errorPage}
+          - ErrorCode: 404
+            ResponseCode: 404
+            ResponsePagePath: !Sub /${errorPage}
+          - ErrorCode: 405
+            ResponseCode: 405
+            ResponsePagePath: !Sub /${errorPage}
+        PriceClass:
+          !If 
+            - priceClass100
+            - PriceClass_100
+            - !If 
+              - priceClass200
+              - PriceClass_200
+              - !If 
+                - priceClassAll
+                - PriceClass_All
+                - PriceClass_100
+        WebACLId: !GetAtt TheWafWebAcl.Arn
+        Enabled: true
+  TheS3OriginBucketPolicy: 
+    Type: AWS::S3::BucketPolicy 
+    Properties: 
+      Bucket: !Ref TheS3OriginBucket 
+      PolicyDocument: 
+        Version: '2012-10-17'
+        Statement: 
+          - Sid: DenyNonSsl
+            Effect: Deny
+            Action: 
+              - 's3:*'
+            Resource: 
+              - !Sub 'arn:aws:s3:::${TheS3OriginBucket}'
+              - !Sub 'arn:aws:s3:::${TheS3OriginBucket}/*'
+            Principal: '*'
+            Condition: 
+              Bool:
+                aws:SecureTransport: 'false'
+          - Sid: AllowGetPut
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: 
+              - 's3:GetObject'
+              - !If 
+                - sitePostRequired
+                - 's3:PutObject'
+                - 's3:GetObject'
+            Resource: 
+              - !Sub 'arn:aws:s3:::${TheS3OriginBucket}/*'
+            Condition: 
+              StringEquals:
+                'AWS:SourceArn': !Sub 'arn:aws:cloudfront::${AWS::AccountId}:distribution/${TheCloudfrontDist}'
+  TheS3LoggingBucketPolicy:
+    Type: AWS::S3::BucketPolicy 
+    Properties: 
+      Bucket: !Ref TheS3LoggingBucket 
+      PolicyDocument: 
+        Version: '2012-10-17'
+        Statement: 
+          - Sid: DenyNonSsl
+            Effect: Deny
+            Action: 
+              - 's3:*'
+            Resource: 
+              - !Sub 'arn:aws:s3:::${TheS3LoggingBucket}'
+              - !Sub 'arn:aws:s3:::${TheS3LoggingBucket}/*'
+            Principal: '*'
+            Condition: 
+              Bool:
+                aws:SecureTransport: 'false'
+  TheRoute53AliasRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      Type: A
+      HostedZoneId: !Ref theHostedZoneId
+      Name:  !Join [".", [!Ref hostOrAliasName, !Ref siteDomainName]]
+      AliasTarget:
+        EvaluateTargetHealth: "false"
+        DNSName: !GetAtt TheCloudfrontDist.DomainName
+        HostedZoneId: Z2FDTNDATAQYW2 
+  TheRoute53ZoneApexAliasRecord:
+    Type: AWS::Route53::RecordSet
+    Condition: zoneApexRequired
+    Properties:
+      Type: A
+      HostedZoneId: !Ref theHostedZoneId
+      Name: !Ref siteDomainName
+      AliasTarget:
+        EvaluateTargetHealth: "false"
+        DNSName: !GetAtt TheCloudfrontDist.DomainName
+        HostedZoneId: Z2FDTNDATAQYW2
+  TheWafWebAcl:
+    Type: AWS::WAFv2::WebACL
+    Properties: 
+      Name: !Sub ${AWS::StackName}-WafWebAcl
+      DefaultAction: 
+        Allow: {}
+      VisibilityConfig:
+        SampledRequestsEnabled: true 
+        CloudWatchMetricsEnabled: true 
+        MetricName: DefaultWebAclMetric
+      Scope: CLOUDFRONT
+      Rules: 
+        - Name: CoreRuleSet
+          Priority: 0
+          OverrideAction:
+            None: {}
+          VisibilityConfig:
+            CloudWatchMetricsEnabled: true
+            MetricName: AWSManagedRulesCommonRuleSet
+            SampledRequestsEnabled: true
+          Statement: 
+            ManagedRuleGroupStatement: 
+              VendorName: AWS 
+              Name: AWSManagedRulesCommonRuleSet 
+        - Name: KnownBadInputsRuleSet
+          Priority: 1
+          OverrideAction:
+            None: {}
+          VisibilityConfig:
+            CloudWatchMetricsEnabled: true
+            MetricName: AWSManagedRulesKnownBadInputsRuleSet
+            SampledRequestsEnabled: true
+          Statement: 
+            ManagedRuleGroupStatement: 
+              VendorName: AWS 
+              Name: AWSManagedRulesKnownBadInputsRuleSet 
+        - Name: IPReputationList
+          Priority: 2
+          OverrideAction:
+            None: {}
+          VisibilityConfig:
+            CloudWatchMetricsEnabled: true
+            MetricName: AWSManagedRulesAmazonIpReputationList
+            SampledRequestsEnabled: true
+          Statement: 
+            ManagedRuleGroupStatement: 
+              VendorName: AWS 
+              Name: AWSManagedRulesAmazonIpReputationList 
+  TheDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub ${AWS::StackName}-performance-dashboard
+      DashboardBody: !Sub | 
+        {
+          "widgets": [
+            {
+              "height": 6,
+              "width": 6,
+              "y": 0,
+              "x": 0,
+              "type": "metric",
+              "properties": {
+                "view": "gauge",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "stat": "Sum",
+                "period": 2592000,
+                "yAxis": {
+                  "left": {
+                  "min": 1,
+                  "max": 15000000
+                  }
+                },
+                "annotations": {
+                  "horizontal": [
+                    [
+                      {
+                        "color": "#b2df8d",
+                        "label": "",
+                        "value": 1
+                      },
+                      {
+                        "value": 1000000000000,
+                        "label": ""
+                      }
+                      ],
+                      {
+                        "color": "#d62728",
+                        "label": "",
+                        "value": 1000000000001,
+                        "fill": "above"
+                      }
+                  ]
+                },
+                "title": "CloudFront Total Requests Last 30 Days",
+                "metrics": [
+                  [ "AWS/CloudFront", "Requests", "Region", "Global", "DistributionId", "${TheCloudfrontDist}" ]
+                ]
+              }
+            },
+            {
+              "height": 6,
+              "width": 6,
+              "y": 0,
+              "x": 6,
+              "type": "metric",
+              "properties": {
+                "view": "gauge",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "stat": "Sum",
+                "period": 2592000,
+                "yAxis": {
+                  "left": {
+                  "min": 1,
+                  "max": 1500000000000
+                  }
+                },
+                "annotations": {
+                  "horizontal": [
+                    [
+                      {
+                        "color": "#b2df8d",
+                        "label": "",
+                        "value": 1
+                      },
+                      {
+                        "value": 1000000000000,
+                        "label": ""
+                      }
+                    ],
+                      {
+                        "color": "#d62728",
+                        "label": "",
+                        "value": 1000000000001,
+                        "fill": "above"
+                      }
+                    ]
+                  },
+                  "title": "CloudFront Total Bytes Downloaded Last 30 Days",
+                  "metrics": [
+                    [ "AWS/CloudFront", "BytesDownloaded", "Region", "Global", "DistributionId", "${TheCloudfrontDist}" ]
+                  ]
+                }
+            },
+            {
+              "height": 6,
+             "width": 12,
+              "y": 0,
+              "x": 12,
+              "type": "metric",
+              "properties": {
+                "metrics": [
+                  [ "AWS/CloudFront", "4xxErrorRate", "Region", "Global", "DistributionId", "${TheCloudfrontDist}", { "color": "#d62728" } ],
+                  [ ".", "5xxErrorRate", ".", ".", ".", ".", { "color": "#d62728" } ]
+                ],
+                "view": "gauge",
+                "stacked": false,
+                "region": "us-east-1",
+                "stat": "Average",
+                "period": 86400,
+                "yAxis": {
+                  "left": {
+                  "min": 1,
+                  "max": 100
+                  }
+                },
+                "annotations": {
+                  "horizontal": [
+                    {
+                      "visible": false,
+                      "color": "#d62728",
+                      "value": 2,
+                      "fill": "above"
+                    }
+                  ]
+                },
+                "title": "CloudFront Error Rates Last 24 Hours",
+                "liveData": false
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 6,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "view": "gauge",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "stat": "Average",
+                "period": 300,
+                  "yAxis": {
+                    "left": {
+                      "min": 1,
+                      "max": 100
+                    }
+                  },
+                "annotations": {
+                  "horizontal": [
+                    {
+                      "visible": false,
+                      "color": "#d62728",
+                      "value": 2,
+                      "fill": "above"
+                    }
+                  ]
+                },
+                "title": "Total Data Stored in S3 Buckets",
+                "liveData": false,
+                "metrics": [
+                  [ "AWS/S3", "BucketSizeBytes", "StorageType", "StandardStorage", "BucketName", "${hostOrAliasName}.${siteDomainName}-website-files", { "period": 300 } ],
+                  [ "...", "${hostOrAliasName}.${siteDomainName}-website-log-files", { "period": 300 } ]
+                ]
+              }
+            }
+          ]
+        }
