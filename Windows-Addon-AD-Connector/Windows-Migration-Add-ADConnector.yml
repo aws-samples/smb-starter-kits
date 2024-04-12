@@ -1,0 +1,283 @@
+## Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy of this
+# software and associated documentation files (the "Software"), to deal in the Software
+# without restriction, including without limitation the rights to use, copy, modify,
+# merge, publish, distribute, sublicense, and/or sell copies of the Software, and to
+# permit persons to whom the Software is furnished to do so.
+#
+# CloudFormation template for an AWS Active Directory Connector.
+# ****** IMPORTANT ******
+# This Starter-Kit is an add-on to the Windows Migration Starter-Kit. Deployment will fail if there is no 
+# Windows Migration Starter-Kit deployed. Ensure that you are in the correct AWS region before attempting to deploy
+# this Starter-Kit. In addition, before deploying this stack:
+# - run the Helper-Script "Utility-Prepare-AD-Connector" in the Helper-Scripts folder on Domain Controller 1
+# - create an AD user for the AD COnnector connection
+# - add that user to the AwsConnectors security group that was created by the "Utility-Prepare-AD-Connector" helper script.
+#
+# When deploying this stack. the user name and password of the AD user in the AwsConnectors group is required. 
+#
+# AD Connector is required for certain AWS services to integrate with your EC2-based Windows Active Directory, such as Amazon 
+# WorkSpaces, Amazon WorkDocs, Amazon WorkMail, and Amazon Simple Email Service. The use of certain AWS Services such as WorkSpaces
+# may make AD Connector a free feature as long as the other services are deployed IN THIS ACCOUNT. For more information, refer to the
+# AWS Documentation on Directory COnnector and the corresponsing service.
+#
+# An AD Connector can take up to 30 minutes to deploy. Because of this, there is no wait handler. CloudFormation will assume that the directory 
+# is created successfully and return a SUCCESS message. If the AD Connector fails to deploy, i.e. if an incorrect AD password is provided, you 
+# may delete the CloudFormation stack after the AD Connector is in a Failed state in the Directory Service console.
+#
+# This Template is suitable for single AD Connector deployments. If you plan to deploy multiple connectors, you should deploy them manually
+# in the AWS Console. A Mix and Match deployment of manually vs. CloudFormation created AD Connectors may result in deletion of the incorrect 
+# AD Connector via the CloudFormation console. 
+# 
+# This Starter-Kit template deploys all AWS components required to deploy an AD Connector for your self managed windows AD Domain.
+# It deploys the following:
+#   - A Secret in Secrets Manager where your domain join account is encrypted and stored securly. 
+#   - AD Connector that connects to an existing EC2-based AD (Deployed by Windows-Migration-Starter-Kit)
+#     - AD Connector in turn creates 2 ENI's in your VPC to communicate with your AD DC's
+#     - AD Connector also creates a Security Group to allow communication between your AD DC and the Directory Conneector Service
+#
+# This template exports outputs to facilitate easy additions of future services or components such as additional servers, VDI (WorkSpaces), Database, etc. 
+# It is recommended that these values are NOT changed in any way. 
+#
+# After deletion, you must manually delete the elastic network interfaces that were created (these have a description of "AWS created network interface for 
+# directory") and delete the security group (it will have a name of directory-id-controllers). 
+#
+# For more details, refer to the Deployment Guide and Troubleshooting Guide.
+#
+# Sample code, software libraries, command line tools, proofs of concept, templates, or other related technology are provided as 
+# AWS Content or Third-Party Content under the AWS Customer Agreement, or the relevant written agreement between you and AWS
+# (whichever applies). You are responsible for testing, securing, and optimizing the AWS Content or Third-Party Content, such as 
+# sample code, as appropriate for production grade use based on your specific quality control practices and standards. Deploying AWS 
+# Content or Third-Party Content may incur AWS charges for creating or using AWS chargeable resources, such as running Amazon EC2 
+# instances or using Amazon S3 storage.
+#
+AWSTemplateFormatVersion: 2010-09-09
+Description: > 
+  This template deploys an Active Directory Connector. This is an expansion pack for the Windows Migration Starter-Kit.
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - 
+        Label:
+          default: REQUIRED Configuration Information - AD Connector
+        Parameters:
+          - AdConnectorUserName
+          - AdConnectorPassword 
+Parameters: 
+  AdConnectorUserName: 
+    Description: > 
+      AD Connector Account Name. This is the account that is required for AD Connector to communicate between AWS Services and a self-managed Active Directory 
+      in an AWS VPC. See Deployment guide for more information.
+    Type: String
+    MinLength: 3
+    MaxLength: 21
+    AllowedPattern: '^[a-zA-Z0-9_]{3,20}$'
+    Default: AwsAdConnector
+  AdConnectorPassword: 
+    Description: Active Directory Account Password for the AD Connector Account
+    Type: String
+    MinLength: 8
+    MaxLength: 50
+    AllowedPattern: '^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]{8,}$'
+    NoEcho: true
+Resources:
+# Creates a secret manager secret to securely store the username and password for the AD Connector Windows User.
+  TheSecret: 
+    Type: AWS::SecretsManager::Secret 
+    Properties: 
+      Name: AdConnectorCreds
+      SecretString: !Sub '{"username":"${AdConnectorUserName}", "password":"${AdConnectorPassword}"}' 
+      KmsKeyId: !ImportValue Windows-Domain-KMS-Key-Alias
+  AdConnector:
+    Type: Custom::AdConnector
+    Properties: 
+      ServiceToken: !GetAtt AdConnLambdaFunction.Arn 
+  AdConnLambdaFunction: 
+    Metadata:
+      checkov:
+        skip: 
+          - id: "CKV_AWS_6"
+            comment: "There are no secrets stored in the CloudFormation template. The username and password are no-echoed, stored in Secrets Manager, and retreived via lambda function code. Refers to lines 167-168 which contain the SecretId filter for the Secrets Manager API Call that retries the secret"
+          - id: "CKV_AWS_115"
+            comment: "This Lambda function will be run only once at creation."
+          - id: "CKV_AWS_116"
+            comment: "SNS Topic configured after - this function only serves to create an AZ Map necessary to creating a stack"
+          - id: "CKV_AWS_117"
+            comment: "VPC creation is dependent on this function."
+          - id: "CKV_AWS_173"
+            comment: "Function uses default service key."
+      cfn_nag:
+        rules_to_suppress: 
+          - id: W58
+            reason: "This is a Lambda Backed Custom Resource and writrd logs to CloudWatch logs group"
+          - id: W89
+            reason: "VPC is not required for a Lambda backed custom resource"
+          - id: W92
+            reason: "This Lambda functions runs only once at creation"
+    Type: AWS::Lambda::Function 
+    Properties: 
+      Description: This function created the Active Directory Connector. To Delete this function, delete the CloudFromation Template which created this function. Do not delete the function from here. 
+      FunctionName: create-ad-connector-lambda-function
+      Runtime: python3.11
+      Role: !GetAtt AdConnLambdaRole.Arn
+      Handler: index.lambda_handler
+      Timeout: 600
+      Tags: 
+        - Key: Starter-Kit-ID
+          Value: Windows-Addon-AD-Connector
+      Environment: 
+        Variables: 
+          windows_domain_name: 
+            Fn::ImportValue: "Windows-Domain-Name" 
+          vpc_id: 
+            Fn::ImportValue: "Windows-Domain-VPC-ID" 
+          dc_subnet_1: 
+            Fn::ImportValue: "Windows-Domain-DC-Subnet1-ID" 
+          dc_subnet_2: 
+            Fn::ImportValue: "Windows-Domain-DC-Subnet2-ID" 
+          domain_controller_1_ip: 
+            Fn::ImportValue: "Windows-Domain-DC1-IP" 
+          domain_controller_2_ip: 
+            Fn::ImportValue: "Windows-Domain-DC2-IP"          
+      Code: 
+        ZipFile: | 
+          import boto3
+          import json
+          import os 
+          import cfnresponse
+
+          client = boto3.client('ds')
+          smclient = boto3.client('secretsmanager')
+
+          def lambda_handler(event, context):
+              try: 
+                  response_data,phys_id = {},'' 
+                  if event["RequestType"] == "Create":  
+                      response_data,phys_id = create_directory_conn()
+
+                  elif event["RequestType"] == "Delete":
+                      response_data = delete_directory_conn()
+
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, response_data, phys_id)
+
+              except Exception as e:
+                  response_data = {}
+                  cfnresponse.send(event, context, cfnresponse.FAILED, response_data)
+                  raise e
+                  
+          def create_directory_conn():
+              smresponse = smclient.get_secret_value(
+                  SecretId = 'AdConnectorCreds'
+              )
+              secret_string = smresponse['SecretString']
+              secret = json.loads(secret_string)
+              response = client.connect_directory(
+                  Name = os.environ.get('windows_domain_name'),
+                  Password = secret["password"],
+                  Description = "Active Directory Connector for " + os.environ.get('windows_domain_name'),
+                  Size='Small',
+                  ConnectSettings = {
+                      'VpcId': os.environ.get('vpc_id'),
+                      'SubnetIds': [
+                          os.environ.get('dc_subnet_1'),os.environ.get('dc_subnet_2')
+                      ],
+                      'CustomerDnsIps': [
+                          os.environ.get('domain_controller_1_ip'),os.environ.get('domain_controller_2_ip')
+                      ],
+                      'CustomerUserName': secret["username"]
+                  },
+                  Tags=[
+                      {
+                          'Key': 'Starter-Kit-ID',
+                          'Value': 'Windows-Addon-AD-Connector'
+                      },
+                  ]
+              )
+              response_data = {'Success': 'Created Directory '+response['DirectoryId']}
+              phys_id = response['DirectoryId']
+              return response_data,phys_id
+              
+          def delete_directory_conn():
+              response_data = {}
+              response = client.describe_directories()
+              if response["DirectoryDescriptions"] and len(response["DirectoryDescriptions"])>0:
+                  directory_id = response["DirectoryDescriptions"][0]["DirectoryId"]
+                  response = client.delete_directory(
+                      DirectoryId = directory_id
+                  )
+              response_data = {'Success': 'Directory deleted '+directory_id}
+              return response_data
+  AdConnLambdaRole: 
+    Metadata:
+      checkov:
+        skip:
+          - id: "CKV_AWS_108"
+            comment: "This action does not support resource-level permissions. Policies granting access must specify * in the resource element."
+          - id: "CKV_AWS_111"
+            comment: "This action does not support resource-level permissions. Policies granting access must specify * in the resource element."
+      cfn_nag: 
+        rules_to_suppress: 
+          - id: W11
+            reason: "This action does not support resource-level permissions. Policies granting access must specify * in the resource element."
+          - id: W28
+            reason: "This is a Lambda backed custom resource and will not be updated"
+    Type: AWS::IAM::Role 
+    Properties: 
+      RoleName: lambda-adconn-create-role
+      AssumeRolePolicyDocument: 
+        Version: '2012-10-17'
+        Statement: 
+          - Effect: Allow 
+            Action: sts:AssumeRole
+            Principal: 
+              Service: 
+                - 'lambda.amazonaws.com'
+      Policies: 
+        - PolicyName: lambdaAdConnPolicy
+          PolicyDocument: 
+            Version: '2012-10-17'
+            Statement: 
+            - Effect: Allow 
+              Action: 
+                - 'logs:CreateLogGroup'
+              Resource: 
+                - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*'
+            - Effect: Allow 
+              Action: 
+              - 'logs:CreateLogStream'
+              - 'logs:PutLogEvents'
+              Resource: 
+                - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/create-ad-connector-lambda-function:*'
+            - Effect: Allow 
+              Action: 
+                - 'ds:AddTagsToResource'
+                - 'ds:ConnectDirectory'
+                - 'ds:DeleteDirectory'
+                - 'ds:DescribeDirectories'
+                - 'ec2:AuthorizeSecurityGroupEgress'
+                - 'ec2:AuthorizeSecurityGroupIngress'
+                - 'ec2:CreateNetworkInterface'
+                - 'ec2:CreateSecurityGroup'
+                - 'ec2:CreateTags'
+                - 'ec2:DeleteNetworkInterface'
+                - 'ec2:DeleteSecurityGroup'
+                - 'ec2:DeleteTags'
+                - 'ec2:DescribeNetworkInterfaces'
+                - 'ec2:DescribeSubnets'
+                - 'ec2:DescribeVpcs'
+                - 'ec2:RevokeSecurityGroupEgress'
+                - 'ec2:RevokeSecurityGroupIngress'
+                - 'secretsmanager:GetSecretValue'
+                - 'secretsmanager:CreateSecret'
+                - 'secretsmanager:DeleteSecret'
+                - 'kms:Decrypt'
+              Resource: '*'
+# Outputs the Directory ID for import by add-on kits.
+Outputs: 
+  ActiveDirectoryConnector:
+    Description: The ID of the Active Directory Connector
+    Value: !Ref AdConnector
+    Export:
+      Name: "Directory-Connector-ID"
