@@ -3244,6 +3244,26 @@ Resources:
           Add-Content -Path C:\Helper-Scripts\Utility-Prepare-AD-Connector.ps1 -Value $out
           $out = '$object' + ".PSBase.CommitChanges()"
           Add-Content -Path C:\Helper-Scripts\Utility-Prepare-AD-Connector.ps1 -Value $out
+          $out = '$activeDirectoryRights = ' + "[System.DirectoryServices.ActiveDirectoryRights] `"CreateChild`",`"DeleteChild`""
+          Add-Content -Path C:\Helper-Scripts\Utility-Prepare-AD-Connector.ps1 -Value $out
+          $out = '$accessControlType = ' + "[System.Security.AccessControl.AccessControlType] `"Allow`""
+          Add-Content -Path C:\Helper-Scripts\Utility-Prepare-AD-Connector.ps1 -Value $out
+          $out = '$objectType = ' + "[guid] `"bf967a9c-0de6-11d0-a285-00aa003049e2`""
+          Add-Content -Path C:\Helper-Scripts\Utility-Prepare-AD-Connector.ps1 -Value $out
+          $out = '$inheritanceType = ' + "[System.DirectoryServices.ActiveDirectorySecurityInheritance] `"All`""
+          Add-Content -Path C:\Helper-Scripts\Utility-Prepare-AD-Connector.ps1 -Value $out
+          $out = '$inheritedObjectType = ' + "[guid] `"00000000-0000-0000-0000-000000000000`""
+          Add-Content -Path C:\Helper-Scripts\Utility-Prepare-AD-Connector.ps1 -Value $out
+          $out = '$ace = ' + "New-Object System.DirectoryServices.ActiveDirectoryAccessRule " + '$id' + "," + '$activeDirectoryRights' + "," + '$accessControlType' +"," + '$objectType' + "," + '$inheritanceType' + "," + '$inheritedObjectType'
+          Add-Content -Path C:\Helper-Scripts\Utility-Prepare-AD-Connector.ps1 -Value $out
+          $out = '$object = ' + "[adsi]`"LDAP://" + '$dn' + "`"" 
+          Add-Content -Path C:\Helper-Scripts\Utility-Prepare-AD-Connector.ps1 -Value $out
+          $out = '$modified = '+ '$false'
+          Add-Content -Path C:\Helper-Scripts\Utility-Prepare-AD-Connector.ps1 -Value $out
+          $out = '$object' + ".PSBase.ObjectSecurity.ModifyAccessRule([System.Security.AccessControl.AccessControlModification]::Add," + '$ace' + ",[ref]" + '$modified)'
+          Add-Content -Path C:\Helper-Scripts\Utility-Prepare-AD-Connector.ps1 -Value $out
+          $out = '$object' + ".PSBase.CommitChanges()"
+          Add-Content -Path C:\Helper-Scripts\Utility-Prepare-AD-Connector.ps1 -Value $out
           $out = '$activeDirectoryRights = ' + "[System.DirectoryServices.ActiveDirectoryRights] `"ListChildren`",`"ReadProperty`",`"GenericWrite`""
           Add-Content -Path C:\Helper-Scripts\Utility-Prepare-AD-Connector.ps1 -Value $out
           $out = '$accessControlType = ' + "[System.Security.AccessControl.AccessControlType] `"Allow`""
@@ -3284,6 +3304,25 @@ Resources:
           Add-Content -Path C:\Helper-Scripts\Utility-Prepare-AD-Connector.ps1 -Value $out
           $out = '$object' + ".PSBase.CommitChanges()"
           Add-Content -Path C:\Helper-Scripts\Utility-Prepare-AD-Connector.ps1 -Value $out
+          $out = '$activeDirectoryRights = ' + "[System.DirectoryServices.ActiveDirectoryRights] `"ListChildren`",`"ReadProperty`",`"GenericWrite`""
+          Add-Content -Path C:\Helper-Scripts\Utility-Prepare-AD-Connector.ps1 -Value $out
+          $out = '$accessControlType = ' + "[System.Security.AccessControl.AccessControlType] `"Allow`""
+          Add-Content -Path C:\Helper-Scripts\Utility-Prepare-AD-Connector.ps1 -Value $out
+          $out = '$objectType = ' + "[guid] `"00000000-0000-0000-0000-000000000000`""
+          Add-Content -Path C:\Helper-Scripts\Utility-Prepare-AD-Connector.ps1 -Value $out
+          $out = '$inheritanceType = ' + "[System.DirectoryServices.ActiveDirectorySecurityInheritance] `"All`""
+          Add-Content -Path C:\Helper-Scripts\Utility-Prepare-AD-Connector.ps1 -Value $out
+          $out = '$inheritedObjectType = ' + "[guid] `"bf967a9c-0de6-11d0-a285-00aa003049e2`""
+          Add-Content -Path C:\Helper-Scripts\Utility-Prepare-AD-Connector.ps1 -Value $out
+          $out = '$ace = ' + "New-Object System.DirectoryServices.ActiveDirectoryAccessRule " + '$id' + "," + '$activeDirectoryRights' + "," + '$accessControlType' +"," + '$objectType' + "," + '$inheritanceType' + "," + '$inheritedObjectType'
+          Add-Content -Path C:\Helper-Scripts\Utility-Prepare-AD-Connector.ps1 -Value $out
+          $out = '$object = ' + "[adsi]`"LDAP://" + '$dn' + "`""
+          Add-Content -Path C:\Helper-Scripts\Utility-Prepare-AD-Connector.ps1 -Value $out
+          $out = '$modified = '+ '$false'
+          Add-Content -Path C:\Helper-Scripts\Utility-Prepare-AD-Connector.ps1 -Value $out
+          $out = '$object' + ".PSBase.ObjectSecurity.ModifyAccessRule([System.Security.AccessControl.AccessControlModification]::Add," + '$ace' + ",[ref]" + '$modified)'
+          Add-Content -Path C:\Helper-Scripts\Utility-Prepare-AD-Connector.ps1 -Value $out
+          $out = '$object' + ".PSBase.CommitChanges()"
           Set-Content -Path C:\Helper-Scripts\Utility-Sync-Time-To-External-Clock.ps1 -Value "w32tm /config /syncfromflags:NO /update"
           Add-Content -Path C:\Helper-Scripts\Utility-Sync-Time-To-External-Clock.ps1 -Value "w32tm /config /syncfromflags:manual /manualpeerlist:`"169.254.169.123`" /update /reliable:yes"
           Add-Content -Path C:\Helper-Scripts\Utility-Sync-Time-To-External-Clock.ps1 -Value "w32tm /resync"
@@ -4168,3 +4207,8 @@ Outputs:
     Value: !Ref AlarmsSnsTopic
     Export:
       Name: "Windows-Domain-SNS-Topic"
+  DcToDcSecurityGroup: 
+    Description: The Security Group ID of the DC to DC Security Group created by Windows Migration stack
+    Value: !GetAtt vpcDcsFromVpcDcsSecurityGroup.GroupId
+    Export:
+      Name: "Windows-Domain-DC-to-DC-Security-Group-ID"
