@@ -71,6 +71,14 @@ Resources:
                 Action:
                   - ec2:DescribeAvailabilityZones
                 Resource: "*"
+  # Log Group
+  AzmapperLogGroup: 
+    Type: AWS::Logs::LogGroup 
+    Properties: 
+      RetentionInDays: 30
+      Tags: 
+        - Key: AWS-Starter-Kit-Name
+          Value: Windows-Migration-Stater-Kit
   # Lambda function
   AzMapperLambdaFunction:
     Metadata:
@@ -95,14 +103,19 @@ Resources:
     Type: AWS::Lambda::Function
     Properties:
       Description: This function creates an AZ Map so that the correct availability zones can be chosen in the Windows Migration Template. Do Not delete this function from here, instead delete from CloudFormation.
-      FunctionName: create-azmap-lambda-function2
-      Runtime: python3.12
+      FunctionName: azmapper-lambda-function
+      Runtime: python3.11
       Timeout: 15
       Environment: 
         Variables: 
           selectedRegion: 
             Fn::Sub: "${AWS::Region}" 
       Role: !GetAtt AzMapperLambdaExecutionRole.Arn
+      LoggingConfig: 
+        ApplicationLogLevel: INFO
+        LogFormat: JSON 
+        LogGroup: !Ref AzmapperLogGroup
+        SystemLogLevel: INFO
       Handler: index.lambda_handler
       Code: 
         ZipFile: |
@@ -110,96 +123,137 @@ Resources:
           import random
           import boto3
           import cfnresponse 
-          selectedRegion = os.environ['selectedRegion']
-          # This python script is part of azmapper.yml - a cloudformation template which deploys a CloudFormation custom resource via this script.
-          # The AZ Mapper maps AZ ID's to AZ Names so that the correct AZ's are chosen for the WIndows Migration Starter Kit stack deployment. Without this,
-          # there are no checks to make sure that WorkSpaces can be added without any issues (WorkSpaces is only available in specific region/AZ pairs)
+
+          selected_region = os.environ['selectedRegion']
+
+          """This python script is part of azmapper.yml - a cloudformation template which deploys a CloudFormation custom resource via this script.
+          The AZ Mapper maps AZ ID's to AZ Names so that the correct AZ's are chosen for the WIndows Migration Starter Kit stack deployment. Without this,
+          there are no checks to make sure that WorkSpaces can be added without any issues (WorkSpaces is only available in specific region/AZ pairs)"""
+
           def lambda_handler(event, context):
-              """Lambda Handler Function for CRUD Operations"""
-              if event['RequestType'] == 'Create':
-                  create_parameters(selectedRegion)
-              elif event['RequestType'] == 'Update':
-                  delete_parameters()
-                  create_parameters(selectedRegion)
-              elif event['RequestType'] == 'Delete':
-                  delete_parameters()
+              try: 
+                  """Lambda Handler Function for CRUD Operations"""
+                  if event['RequestType'] == 'Create':
+                      response_data = create_parameters(selected_region)
+                      print(response_data)
+                  elif event['RequestType'] == 'Update':
+                      response_data = {'NOT_PERMITTED': 'UPDATE NOT PERMITTED'}
+                      print(response_data)
+                      cfnresponse.send(event, context, cfnresponse.FAILED, response_data)
+                  elif event['RequestType'] == 'Delete':
+                      response_data = delete_parameters()
+                      print(response_data)
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, response_data)
 
-              response_data = {}
-              cfnresponse.send(event, context, cfnresponse.SUCCESS, response_data)
+              except Exception as e:
+                  print(e)
+                  response_data = e
+                  cfnresponse.send(event, context, cfnresponse.FAILED, response_data)
 
-          # This function creates the SSM paramaters for AZ Mappings for Regions with WorkSpaces AZ restrictions ONLY. While we map out all AZ's, the build logic is in the CloudFormation resource.
-          def create_parameters(selectedRegion):
-              num_azs = 2 # change this for the number of AZs you want in your deployment, standard is 2
-              """Creates the AZ Mappings and stores them as SSM Parameters"""
-              if selectedRegion == "us-east-1": 
-                  ws_az_ids = ["use1-az2","use1-az4","use1-az6"]
-                  azlist = random.sample(ws_az_ids, num_azs)
-              elif selectedRegion == "us-west-2":
-                  ws_az_ids = ["usw2-az1","usw2-az2","usw2-az3"]
-                  azlist = random.sample(ws_az_ids, num_azs)
-              elif selectedRegion == "ap-northeast-2":
-                  ws_az_ids = ["apne2-az1","apne2-az3"]
-                  azlist = random.sample(ws_az_ids, num_azs)
-              elif selectedRegion == "ap-southeast-1":
-                  ws_az_ids = ["apse1-az1","apse1-az2"]
-                  azlist = random.sample(ws_az_ids, num_azs)
-              elif selectedRegion == "ap-southeast-2":
-                  ws_az_ids = ["apse2-az1","apse2-az3"]
-                  azlist = random.sample(ws_az_ids, num_azs)
-              elif selectedRegion == "ap-northeast-1":
-                  ws_az_ids = ["apne1-az1","apne1-az4"]
-                  azlist = random.sample(ws_az_ids, num_azs)
-              elif selectedRegion == "ca-central-1":
-                  ws_az_ids = ["cac1-az1","cac1-az2"]
-                  azlist = random.sample(ws_az_ids, num_azs)
-              elif selectedRegion == "eu-central-1":
-                  ws_az_ids = ["euc1-az2","euc1-az3"]
-                  azlist = random.sample(ws_az_ids, num_azs)
-              elif selectedRegion == "eu-west-2":
-                  ws_az_ids = ["euw2-az2","euw2-az3"]
-                  azlist = random.sample(ws_az_ids, num_azs)
-              elif selectedRegion == "sa-east-1":
-                  ws_az_ids = ["sae1-az1","sae1-az3"]
-                  azlist = random.sample(ws_az_ids, num_azs)
-              else: 
-                  return
-              n=0
-              for azId in azlist: 
-                  ec2client = boto3.client('ec2')
-                  ec2_response = ec2client.describe_availability_zones(
+          def create_parameters(selected_region):
+              """This function creates the SSM paramaters for AZ Mappings for Regions with WorkSpaces AZ restrictions ONLY. While we map out all AZ's, the build logic is in the CloudFormation resource."""
+              try:
+                  num_azs = 2 # CHANGE THIS VALUE IF YOU WANT A DIFFERENT NUMBER OF AZ'S IN YOUR REGION; DEFAULT IS 2
+                  """These are the Available AZ's for each region to use with Workspaces, based on the region you deploy the template in. This has to be kept updated based on Workspaces releases"""
+                  print(f'Checking {selected_region} for workspace restrictions')
+                  if selected_region == "us-east-1": 
+                      ws_az_ids = ["use1-az2","use1-az4","use1-az6"]
+                      azlist = random.sample(ws_az_ids, num_azs)
+                  elif selected_region == "us-west-2":
+                      ws_az_ids = ["usw2-az1","usw2-az2","usw2-az3"]
+                      azlist = random.sample(ws_az_ids, num_azs)
+                  elif selected_region == "ap-northeast-2":
+                      ws_az_ids = ["apne2-az1","apne2-az3"]
+                      azlist = random.sample(ws_az_ids, num_azs)
+                  elif selected_region == "ap-southeast-1":
+                      ws_az_ids = ["apse1-az1","apse1-az2"]
+                      azlist = random.sample(ws_az_ids, num_azs)
+                  elif selected_region == "ap-southeast-2":
+                      ws_az_ids = ["apse2-az1","apse2-az3"]
+                      azlist = random.sample(ws_az_ids, num_azs)
+                  elif selected_region == "ap-northeast-1":
+                      ws_az_ids = ["apne1-az1","apne1-az4"]
+                      azlist = random.sample(ws_az_ids, num_azs)
+                  elif selected_region == "ca-central-1":
+                      ws_az_ids = ["cac1-az1","cac1-az2"]
+                      azlist = random.sample(ws_az_ids, num_azs)
+                  elif selected_region == "eu-central-1":
+                      ws_az_ids = ["euc1-az2","euc1-az3"]
+                      azlist = random.sample(ws_az_ids, num_azs)
+                  elif selected_region == "eu-west-2":
+                      ws_az_ids = ["euw2-az2","euw2-az3"]
+                      azlist = random.sample(ws_az_ids, num_azs)
+                  elif selected_region == "sa-east-1":
+                      ws_az_ids = ["sae1-az1","sae1-az3"]
+                      azlist = random.sample(ws_az_ids, num_azs)
+                  else:
+                      print("Selected Region is "+selected_region)
+                      print ("Not deploying in a Workspace Region with restricted AZs")
+                      response_data = {'SUCCESS': 'NOT_WS_RESTRICTED_REGION'}
+                      return response_data
+
+                  response_data={}
+                  n=0
+                  for azId in azlist: 
+                      ec2client = boto3.client('ec2')
+                      ec2_response = ec2client.describe_availability_zones(
+                          Filters=[
+                              {
+                                  'Name': 'zone-id',
+                                  'Values': [azId]
+                              }
+                          ]
+                      )
+                      print("Creating new paramter")
+                      for i in ec2_response['AvailabilityZones']:
+                          n=n+1
+                          azId = i['ZoneId']
+                          azName = i['ZoneName']
+                          ssmclient = boto3.client('ssm') 
+                          param_name = f'azmap-az{n}'
+                          ssm_put_response = ssmclient.put_parameter(
+                              Name=param_name,
+                              Type='String',
+                              Value=azName,
+                              Overwrite=True,
+                              Tier='Standard'
+                          )
+                          if ssm_put_response['ResponseMetadata']['HTTPStatusCode'] == 200:
+                              print(f'Successfully added parameter {param_name}')
+                              response_data[param_name]='CREATED'
+                  return response_data
+
+              except Exception as e:
+                  response_data = e
+                  print(e)
+                  return response_data
+
+          def delete_parameters(): 
+              """This function deletes the SSM parameters for AZ Mappings."""
+              try: 
+                  print("Checking Parameter Store for AZ Parameters")
+                  ssmclient = boto3.client('ssm')
+                  response_data = {}
+                  ssm_response = ssmclient.describe_parameters(
                       Filters=[
                           {
-                              'Name': 'zone-id',
-                              'Values': [azId]
+                              'Key': 'Name',
+                              'Values': ['azmap']
                           }
                       ]
                   )
-                  for i in ec2_response['AvailabilityZones']:
-                      n=n+1
-                      azId = i['ZoneId']
-                      azName = i['ZoneName']
-                      ssmclient = boto3.client('ssm')   
-                      ssmclient.put_parameter(
-                          Name='azmap-az'+str(n),
-                          Type='String',
-                          Value=azName,
-                          Overwrite=True,
-                          Tier='Standard'
+                  for i in ssm_response['Parameters']:
+                      param_name = i['Name']
+                      print(f'Deleting parameter {param_name}')
+                      del_response = ssmclient.delete_parameter(
+                          Name=param_name
                       )
+                      if del_response['ResponseMetadata']['HTTPStatusCode'] == 200:
+                          print(f'Successfully deleted parameter {param_name}')
+                          response_data[param_name]='DELETED'
+                  return response_data
 
-          # This function deletes the SSM parameters for AZ Mappings.
-          def delete_parameters(): 
-              """Deletes parameters"""
-              ssmclient = boto3.client('ssm')
-              ssm_response = ssmclient.describe_parameters(
-                  Filters=[
-                      {
-                          'Key': 'Name',
-                          'Values': ['azmap']
-                      }
-                  ]
-              )
-              for i in ssm_response['Parameters']:
-                  ssmclient.delete_parameter(
-                      Name=i['Name']
-                  )
+              except Exception as e:
+                  print(e)
+                  response_data = e
+                  return response_data
