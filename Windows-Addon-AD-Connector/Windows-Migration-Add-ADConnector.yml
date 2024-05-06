@@ -12,9 +12,12 @@
 # This Starter-Kit is an add-on to the Windows Migration Starter-Kit. Deployment will fail if there is no 
 # Windows Migration Starter-Kit deployed. Ensure that you are in the correct AWS region before attempting to deploy
 # this Starter-Kit. In addition, before deploying this stack:
+#
 # - run the Helper-Script "Utility-Prepare-AD-Connector" in the Helper-Scripts folder on Domain Controller 1
 # - create an AD user for the AD COnnector connection
 # - add that user to the AwsConnectors security group that was created by the "Utility-Prepare-AD-Connector" helper script.
+# - Ensure that the AD user has a passowrd setting of "Password Never Expires". Pro tip: Put the user in it's own Organization Unit in AD
+#   and apply a Group Policy Object to that OU to disable password expiry and rotation only for that user. 
 #
 # When deploying this stack. the user name and password of the AD user in the AwsConnectors group is required. 
 #
@@ -25,11 +28,7 @@
 #
 # An AD Connector can take up to 30 minutes to deploy. Because of this, there is no wait handler. CloudFormation will assume that the directory 
 # is created successfully and return a SUCCESS message. If the AD Connector fails to deploy, i.e. if an incorrect AD password is provided, you 
-# may delete the CloudFormation stack after the AD Connector is in a Failed state in the Directory Service console.
-#
-# This Template is suitable for single AD Connector deployments. If you plan to deploy multiple connectors, you should deploy them manually
-# in the AWS Console. A Mix and Match deployment of manually vs. CloudFormation created AD Connectors may result in deletion of the incorrect 
-# AD Connector via the CloudFormation console. 
+# may delete the CloudFormation stack if the AD Connector is in a Failed state in the Directory Service console.
 # 
 # This Starter-Kit template deploys all AWS components required to deploy an AD Connector for your self managed windows AD Domain.
 # It deploys the following:
@@ -41,8 +40,9 @@
 # This template exports outputs to facilitate easy additions of future services or components such as additional servers, VDI (WorkSpaces), Database, etc. 
 # It is recommended that these values are NOT changed in any way. 
 #
-# After deletion, you must manually delete the elastic network interfaces that were created (these have a description of "AWS created network interface for 
-# directory") and delete the security group (it will have a name of directory-id-controllers). 
+# After deletion, you may have to manually delete the elastic network interfaces that were created (these have a description of "AWS created network interface for 
+# directory") and delete the security group (it will have a name of directory-id-controllers). Delete the CloudWatch logs group (ad-connector-log-group) and delete
+# the data-redaction-audit-logs. After those items are deleted you may be able to re-deploy the stack.
 #
 # For more details, refer to the Deployment Guide and Troubleshooting Guide.
 #
@@ -65,6 +65,7 @@ Metadata:
         Parameters:
           - AdConnectorUserName
           - AdConnectorPassword 
+          - AdConnectorConfirmPassword
 Parameters: 
   AdConnectorUserName: 
     Description: > 
@@ -74,7 +75,6 @@ Parameters:
     MinLength: 3
     MaxLength: 21
     AllowedPattern: '^[a-zA-Z0-9_]{3,20}$'
-    Default: AwsAdConnector
   AdConnectorPassword: 
     Description: Active Directory Account Password for the AD Connector Account
     Type: String
@@ -82,6 +82,19 @@ Parameters:
     MaxLength: 50
     AllowedPattern: '^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]{8,}$'
     NoEcho: true
+  AdConnectorConfirmPassword: 
+    Description: Confirm Password for the Active Directory AD Connector Account
+    Type: String
+    MinLength: 8
+    MaxLength: 50
+    AllowedPattern: '^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]{8,}$'
+    NoEcho: true
+# This rule detects if the passwords match and if not, prompts the user to fix the issue.
+Rules: 
+  MatchPasswords:
+    Assertions: 
+      - Assert: !Equals [!Ref AdConnectorPassword, !Ref AdConnectorConfirmPassword]
+        AssertDescription: Passwords do not match. Please try again.
 Resources:
 # Creates a secret manager secret to securely store the username and password for the AD Connector Windows User.
   TheSecret: 
@@ -89,126 +102,17 @@ Resources:
     Properties: 
       Name: AdConnectorCreds
       SecretString: !Sub '{"username":"${AdConnectorUserName}", "password":"${AdConnectorPassword}"}' 
-      KmsKeyId: !ImportValue Windows-Domain-KMS-Key-Alias
+      KmsKeyId: !ImportValue "Windows-Domain-KMS-Key-Alias"
+  DataRedactionAuditLogGroup: 
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: data-protection-audit-logs
+      RetentionInDays: 30
   AdConnector:
     Type: Custom::AdConnector
     Properties: 
       ServiceToken: !GetAtt AdConnLambdaFunction.Arn 
-  AdConnLambdaFunction: 
-    Metadata:
-      checkov:
-        skip: 
-          - id: "CKV_AWS_6"
-            comment: "There are no secrets stored in the CloudFormation template. The username and password are no-echoed, stored in Secrets Manager, and retreived via lambda function code. Refers to lines 167-168 which contain the SecretId filter for the Secrets Manager API Call that retries the secret"
-          - id: "CKV_AWS_115"
-            comment: "This Lambda function will be run only once at creation."
-          - id: "CKV_AWS_116"
-            comment: "SNS Topic configured after - this function only serves to create an AZ Map necessary to creating a stack"
-          - id: "CKV_AWS_117"
-            comment: "VPC creation is dependent on this function."
-          - id: "CKV_AWS_173"
-            comment: "Function uses default service key."
-      cfn_nag:
-        rules_to_suppress: 
-          - id: W58
-            reason: "This is a Lambda Backed Custom Resource and writrd logs to CloudWatch logs group"
-          - id: W89
-            reason: "VPC is not required for a Lambda backed custom resource"
-          - id: W92
-            reason: "This Lambda functions runs only once at creation"
-    Type: AWS::Lambda::Function 
-    Properties: 
-      Description: This function created the Active Directory Connector. To Delete this function, delete the CloudFromation Template which created this function. Do not delete the function from here. 
-      FunctionName: create-ad-connector-lambda-function
-      Runtime: python3.11
-      Role: !GetAtt AdConnLambdaRole.Arn
-      Handler: index.lambda_handler
-      Timeout: 600
-      Tags: 
-        - Key: Starter-Kit-ID
-          Value: Windows-Addon-AD-Connector
-      Environment: 
-        Variables: 
-          windows_domain_name: 
-            Fn::ImportValue: "Windows-Domain-Name" 
-          vpc_id: 
-            Fn::ImportValue: "Windows-Domain-VPC-ID" 
-          dc_subnet_1: 
-            Fn::ImportValue: "Windows-Domain-DC-Subnet1-ID" 
-          dc_subnet_2: 
-            Fn::ImportValue: "Windows-Domain-DC-Subnet2-ID" 
-          domain_controller_1_ip: 
-            Fn::ImportValue: "Windows-Domain-DC1-IP" 
-          domain_controller_2_ip: 
-            Fn::ImportValue: "Windows-Domain-DC2-IP"          
-      Code: 
-        ZipFile: | 
-          import boto3
-          import json
-          import os 
-          import cfnresponse
-
-          client = boto3.client('ds')
-          smclient = boto3.client('secretsmanager')
-
-          def lambda_handler(event, context):
-              try: 
-                  response_data,phys_id = {},'' 
-                  if event["RequestType"] == "Create":  
-                      response_data,phys_id = create_directory_conn()
-
-                  elif event["RequestType"] == "Delete":
-                      response_data = delete_directory_conn()
-
-                  cfnresponse.send(event, context, cfnresponse.SUCCESS, response_data, phys_id)
-
-              except Exception as e:
-                  response_data = {}
-                  cfnresponse.send(event, context, cfnresponse.FAILED, response_data)
-                  raise e
-                  
-          def create_directory_conn():
-              smresponse = smclient.get_secret_value(
-                  SecretId = 'AdConnectorCreds'
-              )
-              secret_string = smresponse['SecretString']
-              secret = json.loads(secret_string)
-              response = client.connect_directory(
-                  Name = os.environ.get('windows_domain_name'),
-                  Password = secret["password"],
-                  Description = "Active Directory Connector for " + os.environ.get('windows_domain_name'),
-                  Size='Small',
-                  ConnectSettings = {
-                      'VpcId': os.environ.get('vpc_id'),
-                      'SubnetIds': [
-                          os.environ.get('dc_subnet_1'),os.environ.get('dc_subnet_2')
-                      ],
-                      'CustomerDnsIps': [
-                          os.environ.get('domain_controller_1_ip'),os.environ.get('domain_controller_2_ip')
-                      ],
-                      'CustomerUserName': secret["username"]
-                  },
-                  Tags=[
-                      {
-                          'Key': 'Starter-Kit-ID',
-                          'Value': 'Windows-Addon-AD-Connector'
-                      },
-                  ]
-              )
-              response_data = {'Success': 'Created Directory '+response['DirectoryId']}
-              phys_id = response['DirectoryId']
-              return response_data,phys_id
-              
-          def delete_directory_conn():
-              response_data = {}
-              response = client.describe_directories()
-              if response["DirectoryDescriptions"] and len(response["DirectoryDescriptions"])>0:
-                  directory_id = response["DirectoryDescriptions"][0]["DirectoryId"]
-                  response = client.delete_directory(
-                      DirectoryId = directory_id
-                  )
-              response_data = {'Success': 'Directory deleted '+directory_id}
-              return response_data
+  # This is the role for the lambda function to use to create/delete the resource.
   AdConnLambdaRole: 
     Metadata:
       checkov:
@@ -249,13 +153,14 @@ Resources:
               - 'logs:CreateLogStream'
               - 'logs:PutLogEvents'
               Resource: 
-                - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/create-ad-connector-lambda-function:*'
+                - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:ad-connector-log-group:*'
             - Effect: Allow 
               Action: 
                 - 'ds:AddTagsToResource'
                 - 'ds:ConnectDirectory'
                 - 'ds:DeleteDirectory'
                 - 'ds:DescribeDirectories'
+                - 'ds:ListTagsForResource'
                 - 'ec2:AuthorizeSecurityGroupEgress'
                 - 'ec2:AuthorizeSecurityGroupIngress'
                 - 'ec2:CreateNetworkInterface'
@@ -272,12 +177,208 @@ Resources:
                 - 'secretsmanager:GetSecretValue'
                 - 'secretsmanager:CreateSecret'
                 - 'secretsmanager:DeleteSecret'
+                - 'ssm:PutParameter'
+                - 'ssm:GetParameter'
                 - 'kms:Decrypt'
               Resource: '*'
+# This is the log group created by the resource. The reason to create this log group is to ensure that the AD Connector credentials get redacted
+# from the CloudWatch logs.
+  AdConnectorLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties: 
+      LogGroupName: ad-connector-log-group
+      RetentionInDays: 7
+      DataProtectionPolicy:
+        Name: ad-connector-log-redact-policy
+        Description: Policy to redact passwords from AD-Connector-Log-Group
+        Version: '2021-06-01'
+        Statement:
+          - Sid: audit-policy 
+            DataIdentifier:
+              - arn:aws:dataprotection::aws:data-identifier/AwsSecretKey
+            Operation:
+              Audit: 
+                FindingsDestination: 
+                  CloudwatchLogs: 
+                    LogGroup: !Ref DataRedactionAuditLogGroup
+          - Sid: redact-policy
+            DataIdentifier:
+              - arn:aws:dataprotection::aws:data-identifier/AwsSecretKey
+            Operation:
+              Deidentify:
+                MaskConfig: {} 
+# This is the Lambda function that creates/delets the AD Connectors.
+  AdConnLambdaFunction: 
+    Metadata:
+      checkov:
+        skip: 
+          - id: "CKV_AWS_6"
+            comment: "There are no secrets stored in the CloudFormation template. The username and password are no-echoed, stored in Secrets Manager, and retreived via lambda function code. Refers to lines 167-168 which contain the SecretId filter for the Secrets Manager API Call that retries the secret"
+          - id: "CKV_AWS_115"
+            comment: "This Lambda function will be run only once at creation."
+          - id: "CKV_AWS_116"
+            comment: "SNS Topic configured after - this function only serves to create an AZ Map necessary to creating a stack"
+          - id: "CKV_AWS_117"
+            comment: "VPC creation is dependent on this function."
+          - id: "CKV_AWS_173"
+            comment: "Function uses default service key."
+      cfn_nag:
+        rules_to_suppress: 
+          - id: W58
+            reason: "This is a Lambda Backed Custom Resource and writrd logs to CloudWatch logs group"
+          - id: W89
+            reason: "VPC is not required for a Lambda backed custom resource"
+          - id: W92
+            reason: "This Lambda functions runs only once at creation"
+    Type: AWS::Lambda::Function 
+    Properties: 
+      Description: This function created the Active Directory Connector. To Delete this function, delete the CloudFromation Template which created this function. Do not delete the function from here. 
+      FunctionName: create-ad-connector-lambda-function
+      Runtime: python3.11
+      Role: !GetAtt AdConnLambdaRole.Arn
+      Handler: index.lambda_handler
+      Timeout: 60
+      Tags: 
+        - Key: Starter-Kit-ID
+          Value: Windows-Addon-AD-Connector
+      Environment: 
+        Variables: 
+          windowsDomainName: 
+            Fn::ImportValue: "Windows-Domain-Name" 
+          vpcId: 
+            Fn::ImportValue: "Windows-Domain-VPC-ID" 
+          dcSubnet1: 
+            Fn::ImportValue: "Windows-Domain-DC-Subnet1-ID" 
+          dcSubnet2: 
+            Fn::ImportValue: "Windows-Domain-DC-Subnet2-ID" 
+          dc1Ip: 
+            Fn::ImportValue: "Windows-Domain-DC1-IP" 
+          dc2Ip: 
+            Fn::ImportValue: "Windows-Domain-DC2-IP" 
+          cfStackId: 
+            Ref: AWS::StackId 
+      LoggingConfig: 
+        ApplicationLogLevel: INFO
+        LogFormat: JSON 
+        LogGroup: !Ref AdConnectorLogGroup
+        SystemLogLevel: INFO
+      Code: 
+        ZipFile: | 
+          """This Python script is part of Windows-Migration-Add-ADConnector.yml. It deploys an AD Connector using exports from the Windows-Migration-
+          Starter-Kit stack."""
+
+          import boto3
+          import json
+          import os 
+          import cfnresponse
+
+          def lambda_handler(event, context):
+              """Lambda Handler Function for CRUD Operations"""
+              try: 
+                  win_domain_name = os.environ.get('windowsDomainName')
+                  vpc_id = os.environ.get('vpcId')
+                  dc_subnet_1 = os.environ.get('dcSubnet1')
+                  dc_subnet_2 = os.environ.get('dcSubnet2')
+                  dc1_ip = os.environ.get('dc1Ip')
+                  dc2_ip = os.environ.get('dc2Ip')
+                  cf_stack_id = os.environ.get('cfStackId')
+                  response_data = {}
+                  phys_id = '' 
+                  if event["RequestType"] == "Create":  
+                      response_data,phys_id = create_directory_connector(win_domain_name, vpc_id, dc_subnet_1, dc_subnet_2, dc1_ip, dc2_ip, cf_stack_id)
+                  
+                  elif event['RequestType'] == 'Update':
+                      response_data = {'NOT_PERMITTED': 'UPDATE NOT PERMITTED'}
+                      print(response_data)
+                      cfnresponse.send(event, context, cfnresponse.FAILED, response_data)
+
+                  elif event["RequestType"] == "Delete":
+                      response_data = delete_directory_conn(cf_stack_id)
+
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, response_data, phys_id)
+
+              except Exception as e:
+                  print(e)
+                  response_data = e
+                  cfnresponse.send(event, context, cfnresponse.FAILED, response_data)
+                  
+          def create_directory_connector(win_domain_name, vpc_id, dc_subnet_1, dc_subnet_2, dc1_ip, dc2_ip, cf_stack_id):
+              """This function creates the AD Connector. It gets the AD credentials from Secrets Manager (created by this template) then uses 
+              the credentials to create the connector"""
+              """Create clients"""
+              smclient=boto3.client('secretsmanager')
+              dsclient = boto3.client('ds')
+              """Retrieve username and password of AD user from Secrets Manager"""
+              print("Retrieving Secret Credentials")
+              smresponse = smclient.get_secret_value(
+                  SecretId = 'AdConnectorCreds'
+              )
+              secret_string = smresponse['SecretString']
+              secret = json.loads(secret_string)
+              """Now create the AD Connector"""
+              print("Creating Directory Connector")
+              response_data = {}
+              dsresponse = dsclient.connect_directory(
+                  Name = win_domain_name,
+                  Password = secret["password"],
+                  Description = f'Active Directory Connector for {win_domain_name}',
+                  Size='Small',
+                  ConnectSettings = {
+                      'VpcId': vpc_id,
+                      'SubnetIds': [
+                          dc_subnet_1,dc_subnet_2
+                      ],
+                      'CustomerDnsIps': [
+                          dc1_ip,dc2_ip
+                      ],
+                      'CustomerUserName': secret["username"]
+                  },
+                  Tags=[
+                      {
+                          'Key': 'Starter-Kit-Name',
+                          'Value': 'Windows-Addon-AD-Connector'
+                      },
+                      {
+                          'Key': 'CloudFormation-Stack-ID',
+                          'Value': cf_stack_id
+                      },
+                  ]
+              )
+              phys_id = dsresponse['DirectoryId']
+              print(f'Directory Connector ID is {phys_id}')
+              response_data[phys_id]='CREATED'
+              return response_data,phys_id
+              
+          def delete_directory_conn(cf_stack_id):
+              """This function deletes the AD Connector"""
+              dsclient = boto3.client('ds')
+              response_data = {}
+              """Get the list of Directories"""
+              print("Getting Directories for Deletion")
+              dsresponse = dsclient.describe_directories()
+              """For each directory in the list get the tags"""
+              for dir in dsresponse['DirectoryDescriptions']:
+                  dir_id = dir['DirectoryId']
+                  tagresponse = dsclient.list_tags_for_resource(
+                      ResourceId=dir_id
+                  )
+                  tags = tagresponse['Tags']
+                  """Check the tags to see if it matches the stack ID, if so, thats the directory we can delete"""
+                  for tag in tags: 
+                      if cf_stack_id in tag['Value']:
+                          """Finally, delete the directory"""
+                          delresponse = dsclient.delete_directory(
+                          DirectoryId=dir_id
+                      )
+                      print(f'Directory Connector {dir_id} deleted')
+              response_data[dir_id]='DELETED'
+              print(response_data)
+              return response_data
+
 # Outputs the Directory ID for import by add-on kits.
 Outputs: 
   ActiveDirectoryConnector:
     Description: The ID of the Active Directory Connector
     Value: !Ref AdConnector
     Export:
-      Name: "Directory-Connector-ID"
+      Name: "Directory-Connector-ID" 

@@ -61,6 +61,7 @@ password manually as instructed in [this
 document.](https://docs.aws.amazon.com/directoryservice/latest/admin-guide/ad_connector_update_creds.html)
 If you do have to rotate the password, also remember to change the
 password in Secrets Manager.
+Pro Tip: Create an Organizational Unit in Active Directory, add only the AD Connector User to it, and set the password expiration policy to never expires on that OU. 
 
 ![](./dg_imgs/media/image5.png)
 
@@ -130,3 +131,5 @@ and other AWS services can be connected to your directory.
 If the Directory is not ready, or comes up "Failed", the issue is likely
 to be a bad password. You can delete and re-create the stack if this
 happens.
+
+If you need to delete the stack, after deletion, delete the ad-connector-log-group in CloudWatch logs.
