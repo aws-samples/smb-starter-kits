@@ -382,3 +382,8 @@ Outputs:
     Value: !Ref AdConnector
     Export:
       Name: "Directory-Connector-ID" 
+  DataRedactionAuditLogGroup:
+    Description: The ID of the Data Redaction Audit Log Group
+    Value: !Ref DataRedactionAuditLogGroup
+    Export:
+      Name: "Data-Redaction-Audit-Logs-Group"
