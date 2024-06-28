@@ -803,6 +803,7 @@ Resources:
 # Site to Site VPN Connection
   theVpnConnection: 
     Type: AWS::EC2::VPNConnection
+    DependsOn: vpnGatewayAttachment
     Properties: 
       Type: ipsec.1
       StaticRoutesOnly: true
@@ -811,30 +812,35 @@ Resources:
 # VPN Route to customer prem
   vpnRouteToPrem:
     Type: AWS::EC2::VPNConnectionRoute
+    DependsOn: vpnGatewayAttachment
     Properties: 
       DestinationCidrBlock: !Ref OnPremCidr
       VpnConnectionId: !Ref theVpnConnection
 # Routes to prem for each subnet route table
   private1RouteToPrem:
     Type: AWS::EC2::Route
+    DependsOn: vpnGatewayAttachment
     Properties:
       DestinationCidrBlock: !Ref OnPremCidr
       RouteTableId: !Ref rtbPrivate1
       GatewayId: !Ref theVpnGateway
   private2RouteToPrem:
     Type: AWS::EC2::Route
+    DependsOn: vpnGatewayAttachment
     Properties:
       DestinationCidrBlock: !Ref OnPremCidr
       RouteTableId: !Ref rtbPrivate2
       GatewayId: !Ref theVpnGateway
   private3RouteToPrem:
     Type: AWS::EC2::Route
+    DependsOn: vpnGatewayAttachment
     Properties:
       DestinationCidrBlock: !Ref OnPremCidr
       RouteTableId: !Ref rtbPrivate3
       GatewayId: !Ref theVpnGateway
   private4RouteToPrem:
     Type: AWS::EC2::Route
+    DependsOn: vpnGatewayAttachment
     Properties:
       DestinationCidrBlock: !Ref OnPremCidr
       RouteTableId: !Ref rtbPrivate4
