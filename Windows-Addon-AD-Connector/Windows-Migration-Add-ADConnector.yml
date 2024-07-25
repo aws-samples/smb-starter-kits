@@ -55,6 +55,7 @@
 #
 AWSTemplateFormatVersion: 2010-09-09
 Description: > 
+  SK-Windows-Migration-Addon-AD-Connector
   This template deploys an Active Directory Connector. This is an expansion pack for the Windows Migration Starter-Kit.
 Metadata:
   AWS::CloudFormation::Interface:

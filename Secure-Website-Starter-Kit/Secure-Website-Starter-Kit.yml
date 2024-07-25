@@ -39,7 +39,9 @@ Metadata:
         Parameters: 
           - postList 
           - noPostList
-Description: This stack deploys all components for a secure static website in CloudFront. 
+Description: >
+  SK-Secure-Website
+  This stack deploys all components for a secure static website in CloudFront. 
 Rules:
   DeployRule:
     Assertions:

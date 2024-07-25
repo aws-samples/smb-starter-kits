@@ -17,6 +17,7 @@
 #
 AWSTemplateFormatVersion: 2010-09-09
 Description: > 
+  SK-Windows-Migration-Utility-AZMapper
   Creates an AZ Map which is required for various operability of Windows Migration Starter Kit and add-on kits. 
 Resources:
 # Lambda function invoker

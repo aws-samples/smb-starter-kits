@@ -24,7 +24,9 @@ Metadata:
         Parameters:
           - ZoneDomainName
 # Creates Hosted Zone in Route 53
-Description: This is the Route 53 Public Hosted Zone. Refer to the outputs tab for the Zone ID and NameServers configuration.
+Description: >
+  SK-Secure-Website-Utility-CreateHostedZone
+  This is the Route 53 Public Hosted Zone. Refer to the outputs tab for the Zone ID and NameServers configuration.
 Parameters:
   ZoneDomainName:
     Description: Enter the Public Routable Domain Name.
