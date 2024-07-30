@@ -1,0 +1,232 @@
+## Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy of this
+# software and associated documentation files (the "Software"), to deal in the Software
+# without restriction, including without limitation the rights to use, copy, modify,
+# merge, publish, distribute, sublicense, and/or sell copies of the Software, and to
+# permit persons to whom the Software is furnished to do so.
+#
+# Sample code, software libraries, command line tools, proofs of concept, templates, or other related technology are provided as 
+# AWS Content or Third-Party Content under the AWS Customer Agreement, or the relevant written agreement between you and AWS
+# (whichever applies). You are responsible for testing, securing, and optimizing the AWS Content or Third-Party Content, such as 
+# sample code, as appropriate for production grade use based on your specific quality control practices and standards. Deploying AWS 
+# Content or Third-Party Content may incur AWS charges for creating or using AWS chargeable resources, such as running Amazon EC2 
+# instances or using Amazon S3 storage.
+#
+# CloudFormation template which creates a custom image from a WorkSpace. This is part of the Windows-Workspaces-Add-On Starter Kit and you should only use this 
+# template to create images from WorkSpaces that were deployed from the WorkSpaces automation service.
+#
+#
+# You are responsible for the cost of usage of the resources deployed in this Service Pack. Please refer to the AWS Pricing Calculator to verify the costs
+# of the resources deployed in this Service Pack prior to deployment. The costs displayed in the Parameters dialogs are subject to change and may not be accurate.
+#
+# This template exports outputs to facilitate easy additions of future services or components such as additional servers, VDI (WorkSpaces), Database, etc. 
+# It is recommended that these values are NOT changed in any way. 
+#
+# For more details, refer to the Deployment Guide and Troubleshooting Guide.
+#
+AWSTemplateFormatVersion: 2010-09-09
+Description: > 
+  SK-Windows-Migration-Utility-Workspaces-Build-Image
+  This template builds a Workspaces Golden Image from the Workspaces starter kit.
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - 
+        Label:
+          default: Configuration Information
+        Parameters:
+          - ImageName
+          - ImageDescription
+          - WorkspaceUserName
+Parameters: 
+  ImageName:
+    Type: String
+    Description: >
+      The Name of the image that you will build. It should be descriptive of the image purpose, i.e. Accounting-Image.
+  ImageDescription:
+    Type: String
+    Description: >
+      A long description of the image that you will build. 
+  WorkspaceUserName: 
+    Type: String
+    Description: >
+      The username that is assigned to the Workspace that the image will be built from.
+Resources:
+  # CreateWorkspaceImage: 
+  #   Type: Custom::CreateWorkspaceImage
+  #   Properties: 
+  #     ServiceToken: !GetAtt CreateWsImageLambdaFunction.Arn 
+  CreateWsImageLambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub Workspaces-Create-{ImageName)-${AWS::Region}
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: "/"
+      Policies:
+        - PolicyName: Create-Image-Lambda-Policy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:Workspaces-Starter-Kit-Logs:*"
+              - Effect: Allow
+                Action:
+                  - workspaces:CreateWorkspaceImage
+                  - workspaces:DescribeWorkspace
+                  - workspaces:DescribeWorkspaceImages
+                  - workspaces:DeleteWorkspaceImage
+                  - workspaces:StartWorkspaces
+                  - workspaces:CreateTags
+                  - ds:DescribeDirectories
+                Resource: "*"
+              - Effect: Allow
+                Action: 
+                  - iam:GetRole
+                Resource: !Sub "arn:aws:iam::${AWS::AccountId}:role/workspaces_DefaultRole"
+              - Effect: Allow
+                Action: 
+                  - ds:DescribeDirectories
+                Resource: "*"
+              - Effect: Allow
+                Action: 
+                  - sns:Publish
+                Resource: !ImportValue "Windows-Domain-SNS-Topic"
+              - Effect: Allow
+                Action:
+                  - iam:PassRole
+                Resource: !Sub "arn:aws:iam::${AWS::AccountId}:role/workspaces_DefaultRole"  
+                Condition:
+                  StringEquals:
+                    iam:PassedToService: workspaces.amazonaws.com 
+  CreateWsImageLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: This Lambda function creates an image from an imaging workspace to create custom Bundles.
+      FunctionName: !Join ["-", ["Workspaces-Create", !Ref "ImageName"]]
+      Runtime: python3.11
+      Timeout: 60
+      Environment: 
+        Variables: 
+          directoryId: 
+            Fn::ImportValue: "Directory-Connector-ID"
+          wkspUserName: !Ref WorkspaceUserName
+          imgName: !Ref ImageName
+          imgDesc: !Ref ImageDescription
+      Role: !GetAtt CreateWsImageLambdaExecutionRole.Arn
+      LoggingConfig: 
+        ApplicationLogLevel: INFO
+        LogFormat: JSON 
+        LogGroup: Workspaces-Starter-Kit-Logs
+        SystemLogLevel: INFO
+      Handler: index.lambda_handler
+      Code: 
+        ZipFile: |
+          import boto3
+          import os
+          import time
+          import cfnresponse
+
+          def lambda_handler(event, context):
+              try: 
+                  ws_user = os.environ.get('wkspUserName')
+                  img_name = os.environ.get('imgName')
+                  img_desc = os.environ.get('imgDesc')
+                  dir_id = os.environ.get('directoryId')
+                  if event["RequestType"] == "Create":
+                      response_data = {}
+                      phys_id = ''
+                      ws_id, ws_state = check_ws_status(ws_user,dir_id)
+                      if ws_state == 'AVAILABLE':
+                          phys_id = create_image(ws_id,img_name,img_desc)
+                          response_data['ImageId']=phys_id
+                      cfnresponse.send(event, context, cfnresponse.SUCCESS, response_data, phys_id)
+                  if event["RequestType"] == "Update":
+                      response_data={'SUCCESS': 'NO UPDATES PERMITTED'}
+                      cfnresponse.send(event, context, cfnresponse.FAILED, response_data) 
+                  if event["RequestType"] == "Delete":
+                      response_data = delete_image(img_name)
+                      cfnresponse.send(event, context, cfnresponse.FAILED, response_data) 
+              except Exception as e:
+                  print(e)
+                  cfnresponse.send(event, context, cfnresponse.FAILED, response_data)   
+          
+          def check_ws_status(ws_user,dir_id):
+              client = boto3.client('workspaces')
+              print(f'Checking workspace state for user {ws_user}')
+              error_states = ['IMPAIRED', 'UNHEALTHY', 'REBUILDING', 'MAINTENANCE', 'ERROR', 'TERMINATING', 'TERMINATED', 'ADMIN_MAINTENANCE']
+              ws_state=""
+              while ws_state != 'AVAILABLE':
+                  time.sleep(10)
+                  response = client.describe_workspaces(
+                      DirectoryId=dir_id,
+                      UserName=ws_user
+                  )  
+                  ws_state = response['Workspaces'][0]['State']
+                  ws_id=response['Workspaces'][0]['WorkspaceId']
+                  print(f'Workspace state of {ws_user} workspace with workspace id {ws_id} is {ws_state}')
+                  if ws_state == 'STOPPED':
+                      print(f'Starting Workspace {ws_id}')
+                      client.start_workspaces(
+                          StartWorkspaceRequests=[
+                              {
+                                  'WorkspaceId': ws_id
+                              },
+                          ]
+                      )
+                  elif ws_state in error_states:
+                      raise Exception('WorkSpace is in an error state. Please check the WorkSpace in the Console and try again.')
+                      print(f'Error with Workspace {ws_id}, state is {ws_state}')
+                      return ws_id,ws_state
+                  elif ws_state=="AVAILABLE":
+                      print(f'reponse from check_ws_status is {ws_id} and {ws_state}')
+                      return ws_id, ws_state
+          
+          def create_image(ws_id,img_name,img_desc):
+              client = boto3.client('workspaces')
+              print(f'Creating Image of Workspace ID {ws_id}')
+              response = client.create_workspace_image(
+                  Name=img_name,
+                  Description=img_desc,
+                  WorkspaceId=ws_id,
+                  Tags=[
+                      {
+                          'Key': 'AWS-Starter-Kit-Name',
+                          'Value': 'Windows-Workspaces-Add-On'
+                      },
+                  ]
+              )
+              image_id=response['ImageId']
+              phys_id=image_id
+              return phys_id
+          
+          def delete_image(img_name):
+              client = boto3.client('workspaces')
+              response_data = {}
+              images = client.describe_workspace_images()
+              for image in images['Images']:
+                  if image['Name'] == img_name:
+                      client.delete_workspace_image(
+                          ImageId=image['ImageId']
+                      )
+                  response_data['DeletedImage']='SUCCESS'
+              return response_data
+          
+# Outputs: 
+#   ImageId:
+#     Description: WorkSpace Image ID
+#     Value: !Ref CreateWorkspaceImage
+#     Export: 
+#       Name: !Ref ImageName

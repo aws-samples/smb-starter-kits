@@ -1,0 +1,2358 @@
+## Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy of this
+# software and associated documentation files (the "Software"), to deal in the Software
+# without restriction, including without limitation the rights to use, copy, modify,
+# merge, publish, distribute, sublicense, and/or sell copies of the Software, and to
+# permit persons to whom the Software is furnished to do so.
+#
+# Sample code, software libraries, command line tools, proofs of concept, templates, or other related technology are provided as 
+# AWS Content or Third-Party Content under the AWS Customer Agreement, or the relevant written agreement between you and AWS
+# (whichever applies). You are responsible for testing, securing, and optimizing the AWS Content or Third-Party Content, such as 
+# sample code, as appropriate for production grade use based on your specific quality control practices and standards. Deploying AWS 
+# Content or Third-Party Content may incur AWS charges for creating or using AWS chargeable resources, such as running Amazon EC2 
+# instances or using Amazon S3 storage.
+#
+# CloudFormation template to deploy automation for Amazon WorkSpaces. After deploying this template, WorkSpaces creation,
+# migration, and deletion is automated via Lambda Functions. 
+#
+# The library of AWS Public Bundles will be built in your Active Directory based on the selections you make in the 
+# CloudFormation template parameters. 
+# To create a WorkSpace: Add a user to one of the WorkSpaces groups that are created in the Active Directory
+# To migrate a WorkSpace: Move a user from their existing WorkSpaces AD group to the AD group to migrate their WorkSpace to.
+# To delete a WorkSpace: Remove a user from the AD group to delete their WorkSpace.
+# To create a WorkSpace to be used as a "Golden Image": Create an Active Directory User with "ImageCreation" (not case sensitive) 
+# in the Username (Login Name). Use the "Workspaces-Create-Bundle" CloudFormation template to create the bundle with your golden
+# image. Pro Tip: Use the STANDARD built in bundle to create your golden image, taking advantage of the WorkSpaces free tier. See
+# https://aws.amazon.com/workspaces/pricing/ and select the "Special pricing offers" link for more information.
+#
+# This Starter Kit is an expansion for the Windows Migration Starter Kit. Deployment will fail if there is no 
+# Windows Migration Starter Kit or AD-Connector Starter Kit deployed. Ensure that you are in the correct AWS region before attempting to deploy this Starter Kit.
+# 
+# You are responsible for the cost of usage of the resources deployed in this Starter Kit. Please refer to the AWS Pricing Calculator to verify the costs
+# of the resources deployed in this Starter Kit prior to deployment. The costs displayed in the Parameters dialogs are subject to change and may not be accurate.
+# 
+# This Starter Kit template deploys all AWS components required to run an automated AWS WorkSpaces with your migrated Windows domain.
+# It deploys the following:
+# 
+# - Roles for execution of the Lambda Functions
+# - Activation of your Directory Connector for WorkSpaces via Lambda Function
+# - Lambda Layer which enables Lambda to query Active Directory for group membership and automatically
+#   spins up workspaces
+# - A Lambda function which checks daily for the latest workspace bundle IDs and updates them as SSM Parameters
+# - A Lambda function which checks every 15 minutes for changes in workspaces AD groups membership and creates/deletes or stops instances
+# - KMS Key for the Log Files that the Lambda functions generate
+# - A temporary S3 bucket which stores the Lambda Layer - which is deleted after the Lamda Layer is ceated
+# - A temporary EC2 instance which creates the Lambda Layer and uploads it to S3. The instance is deleted 
+#   after the Lambda Layer is created.
+#
+# IMPORTANT - THIS Starter Kit IS NOT SUITABLE FOR BRING-YOUR-OWN-(WINDOWS)-LICENSING. If you require BYOL, please open a 
+# support case at console.aws.amazon.com/workspaces/v2/account-settings or contact your channel partner. This does not apply 
+# to M365 Licensing. M365 apps may be installed with M365 licenses by creating a WorkSpace image.
+#
+# This template exports outputs to facilitate easy additions of future services or components such as additional servers, VDI (WorkSpaces), Database, etc. 
+# It is recommended that these values are NOT changed in any way. 
+#
+# For more details, refer to the Deployment Guide and Troubleshooting Guide.
+AWSTemplateFormatVersion: 2010-09-09
+Description: > 
+  SK-Windows-Migration-Addon-Workspaces
+  This template activates Amazon WorkSpaces Automation. WorkSpaces automation manages the deployment of workspaces through adding or 
+  removing Acitve Directory users from Workspaces created groups. This is an expansion stack to the Windows Migration
+  and AD Connector Starter Kits. Those kits are required to be deployed for this stack to work.
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - 
+        Label:
+          default: REQUIRED Configuration Information - Workspaces Automation
+        Parameters:
+          - DeploymentType
+          - WorkspacesOU
+          - UsersHaveLocalAdminRights
+          - WorkspacesTerminationBehavior
+      - 
+        Label:
+          default: > 
+            OPTIONAL Amazon Public Bundles Configuration - Workspaces Automation 
+            These settings determine which of the Amazon Public Bundles will be included in automation. 
+        Parameters: 
+          - IncludeWindowsVersions
+          - IncludeOffice
+          - Protocols
+          - BundleTypes
+Parameters:
+  DeploymentType:
+    Description: > 
+      This setting specifies what the deployment type is for the Automation. If this is set to "TEST", workspaces will be deployed by automation in "AUTO-STOP" mode; meaning, groups will only be created for HOURLY 
+      of the group, will be deployed as hourly workspaces (Workspaces that are 'ALWAYS ON' get billed monthly). If this is set to "PRODUCTION", workspaces will be deployed by automation in accordance with AD 
+      group membership settings.
+    Type: String
+    Default: "TEST"
+    AllowedValues: 
+      - "TEST"
+      - "PRODUCTION"  
+  WorkspacesTerminationBehavior: 
+    Description: > 
+      This setting specifies what the automation does when a user is removed from an AD group that is workspaces-enabled. A setting of "RETAIN" retains the workspace, changing the 
+      running mode to hourly and shutting down the workspace. The workspaces can be deleted manually. A setting of "DELETE" deletes the workspace immediately. Refer to the WorkSpaces pricing guide 
+      for more information.
+    Type: String
+    Default: "RETAIN"
+    AllowedValues: 
+      - "DELETE"
+      - "RETAIN"
+  WorkspacesOU: 
+    Description: > 
+      This is the Active Directory OU that WorkSpaces will be placed in when created. This OU must already be created in AD. If this is left blank, WorkSpaces will
+      be placed in the default "Computers" container inside Active Directory. 
+    Type: String
+  UsersHaveLocalAdminRights:
+    Description: >
+      This setting determines if users should have local admin rights on the Workspaces.
+    Type: String
+    AllowedValues: 
+      - "-Yes-"
+      - "-No-"
+    Default: "-Yes-"
+  IncludedWindowsVersions: 
+    Description: >
+      This setting determines which versions of Windows of the AWS Public Bundles you want to use. 
+    Type: String
+    AllowedValues: 
+      - "Server 2022"
+      - "Server 2022 and Server 2019"
+      - "Server 2022 and Server 2019 and Server 2016"
+    Default: "Server 2022"
+  IncludeOffice:
+    Description: >
+      This setting determines whether or not to include Office in the AWS Public Bundles. 
+    Type: String
+    AllowedValues: 
+      - "-Yes-"
+      - "-No-"
+    Default: "-No-"
+  WorkspacesProtocols:
+    Description: >
+      This setting determines which Workspaces protocols you want to use with the AWS Public Bundles. 
+      WSP is designed to empower end users with highly responsive, full-featured desktops, regardless 
+      of bandwidth conditions. For audio/video calls, WSP minimizes bandwidth consumption while delivering a 
+      high-quality end-user experience, making it ideal for collaboration. PCoIP uses advanced display compression 
+      to allow users remote access to their on-premises workstations or virtual machine instances in local data 
+      centers or public clouds from a broad range of endpoint devices. For more on when to use which protocols, 
+      see https://docs.aws.amazon.com/workspaces/latest/adminguide/amazon-workspaces-protocols.html.
+    Type: String
+    AllowedValues: 
+      - "WSP"
+      - "PCoIP"
+      - "BOTH"
+    Default: "BOTH"
+  WorkSpacesComputeTypes: 
+    Description: >
+      This setting determines which Compute types you want to use out of the AWS Public Bundles. 
+      Standard Compute has 2 vCPU, 4GB Memory, 80GB Root Volume and 50GB User Volume
+      Performance Compute has 2 vCPU, 8GB Memory, 80GB Root Volume and 100GB User Volume
+      Power Compute has 4 vCPU, 16GB of Memory, 175GB Root Volume and 100GB User Volume
+      PowerPro Compute has 8 vCPU, 32GB of Memory, 175GB Root Volume and 100GB User Volume
+    Type: String
+    AllowedValues: 
+      - "Standard"
+      - "Standard and Performance"
+      - "Standard and Performance and Power"
+      - "Standard and Performance and Power and PowerPro"
+    Default: "Standard"
+Resources: 
+# The KMS Key that encrypts the log files.
+  TheKmsKeyForLogs: 
+    Type: AWS::KMS::Key
+    Properties: 
+      Description: "KMS Key Specifically for the WorkSpaces Starter Kit Log Group"
+      EnableKeyRotation: true
+      PendingWindowInDays: 7
+      KeyPolicy: 
+        Version: 2012-10-17
+        Id: key-default-1
+        Statement: 
+          - Sid: Enable IAM User Permissions
+            Effect: Allow
+            Principal: 
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action: kms:*
+            Resource: "*"
+          - Sid: Allow Cloudwatch Logs to use the key
+            Effect: Allow
+            Principal: 
+              Service: logs.amazonaws.com
+            Action: 
+              - kms:ListAliases
+              - kms:ListKeys
+              - kms:Decrypt
+              - kms:Encrypt
+              - kms:CreateGrant
+              - kms:RetireGrant
+              - kms:RevokeGrant
+              - kms:ListGrants
+              - kms:Verify
+              - kms:ReEncryptFrom
+              - kms:ReEncryptTo
+              - kms:GenerateMac
+              - kms:VerifyMac
+              - kms:GenerateRandom
+              - kms:DescribeKey
+              - kms:Sign
+              - kms:GenerateDataKey
+              - kms:GenerateDataKeyWithoutPlaintext
+            Resource: "*"
+      Tags: 
+        - Key: Name
+          Value: Workspaces-Starter-Kit-Logs-Key
+        - Key: AWS-Starter-Kit-Name
+          Value: Windows-Workspaces-Add-On
+# This Log Group stores all of the logs for each Lambda function in this template, with data protection policies.
+  WorkspacesStarterKitLogGroup: 
+    Type: AWS::Logs::LogGroup 
+    Properties: 
+      LogGroupName: Workspaces-Starter-Kit-Logs
+      KmsKeyId: !GetAtt TheKmsKeyForLogs.Arn
+      DataProtectionPolicy:
+        Name: ad-connector-log-redact-policy
+        Description: Policy to redact passwords from AD-Connector-Log-Group
+        Version: '2021-06-01'
+        Configuration: 
+          CustomDataIdentifier: 
+            - Name: "Active-Directory-Credentials"
+              Regex: "Found.*\\.*"
+        Statement:
+          - Sid: audit-policy 
+            DataIdentifier:
+              - arn:aws:dataprotection::aws:data-identifier/AwsSecretKey
+            Operation:
+              Audit: 
+                FindingsDestination: 
+                  CloudwatchLogs: 
+                    LogGroup: !ImportValue Data-Redaction-Audit-Logs-Group
+          - Sid: redact-policy
+            DataIdentifier:
+              - arn:aws:dataprotection::aws:data-identifier/AwsSecretKey
+            Operation:
+              Deidentify:
+                MaskConfig: {} 
+      RetentionInDays: 30
+      Tags: 
+        - Key: AWS-Starter-Kit-Name
+          Value: Windows-Workspaces-Add-On
+  RoleForLambdaLayerCreator: 
+    Metadata:
+      cfn_nag: 
+        rules_to_suppress: 
+          - id: W11
+            reason: "* Resource permission is limited by condition statement on lines 276-279"
+          - id: W11
+            reason: "* EC2 Instance role for S3 on line 290 limits GetObject and PutObject to this bucket only and bucket is deleted upon completion of job"
+          - id: W28
+            reason: "Resource will not be replaced in an update" 
+      cdk_nag: 
+        rules_to_suppress: 
+          - id: AwsSolutions-IAM5
+            reason: "* Resource permission is limited by condition statement on lines 276-279"
+          - id: AwsSolutions-IAM5
+            reason: "* EC2 Instance role for S3 on line 290 limits GetObject and PutObject to this bucket only and bucket is deleted upon completion of job"
+    Type: AWS::IAM::Role
+    Properties: 
+      RoleName: Workspaces-CreateLambdaLayer-InstanceRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal: 
+              Service: 
+                - "ec2.amazonaws.com"
+            Action: 
+              - "sts:AssumeRole"
+      Policies: 
+        - PolicyName: "Lambda-Layer-Creator-Policy"
+          PolicyDocument: 
+            Version: "2012-10-17"
+            Statement: 
+              - Effect: Allow
+                Action:
+                  - lambda:ListLayerVersions
+                  - lambda:PublishLayerVersion
+                Resource: "*" 
+                Condition: 
+                  ForAllValues:StringLike:
+                    lambda:Layer: 
+                      "arn:aws:lambda:us-east-1:971294478073:layer:python-ldap3:*"
+              - Effect: "Allow"
+                Action: 
+                  - s3:ListBucket
+                Resource: "arn:aws:s3:::ldap3-layer-us-east-1-971294478073"
+              - Effect: "Allow"
+                Action: 
+                  - s3:GetObject
+                  - s3:PutObject
+                Resource: "arn:aws:s3:::ldap3-layer-us-east-1-971294478073/*"
+      Tags: 
+        - Key: AWS-Starter-Kit-Name
+          Value: Windows-Workspaces-Add-On
+# This is the EC2 Instance Profile for the EC2 instance which creates the Lambda Layer.
+  LambdaLayerCreatorInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties: 
+      InstanceProfileName: LambdaLayerCreatorInstanceProfile
+      Roles: 
+        - !Ref RoleForLambdaLayerCreator
+# Invoker for the CreateLambdaLayer function.
+  CreateLambdaLayer: 
+    Type: Custom::CreateLambaLayer
+    Properties: 
+      ServiceToken: !GetAtt CreateLambdaLayerLambdaFunction.Arn 
+# Role for the CreateLambdaLayer function.
+  CreateLambdaLayerExecutionRole:
+    # checkov:skip=CKV_AWS_111: See Conditions that limit "*" resources permissions on lines 340-343, 348-353, 358-361, 371-374. ssm Parameter wildcard only allows access to aws public parameters
+    Metadata: 
+      cdk_nag: 
+        rules_to_suppress: 
+          - id: AwsSolutions-IAM5
+            reason: "* Resource permission is limited by condition statement on lines 340-343. 348-353, 358-361. 371-374. ssm Parameter wildcard only allows access to aws public parameters"
+      cfn_nag:
+        rules_to_suppress:
+          - id: W11
+            reason: "See Conditions that limit *. resources permissions on lines 340-343, 348-353, 358-361, 371-374. ssm Parameter wildcard only allows access to aws public parameters"
+          - id: W28
+            reason: "Resource will not be replaced in an update" 
+          - id: W76
+            reason: "Permissions are constructed with Least Access principle"
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub Workspaces-CreateLambdaLayer-FunctionRole-${AWS::Region}
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: "/"
+      Policies:
+        - PolicyName: Create-Lambda-Layer-Lambda-Policy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !GetAtt WorkspacesStarterKitLogGroup.Arn
+              - Effect: Allow
+                Action:
+                  - ec2:RunInstances
+                Resource: "*" 
+              - Effect: Deny
+                Action: 
+                  - ec2:RunInstances
+                Resource: "*"
+                Condition: 
+                  ForAnyValue:StringNotLike:
+                    ec2:InstanceType: 
+                      "t3.micro"
+              - Effect: Allow
+                Action:
+                  - ec2:CreateTags
+                Resource: !Sub "arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:instance/*"
+                Condition:
+                  StringEquals:
+                    ec2:CreateAction:
+                      "RunInstances"
+                    aws:RequestTag/Creator:
+                      "workspaces-create-lambda-layer"
+              - Effect: Allow
+                Action: 
+                  - ec2:TerminateInstances
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    aws:ResourceTag/Creator:
+                      "workspaces-create-lambda-layer"              
+              - Effect: Allow
+                Action: 
+                  - ssm:GetParameter
+                Resource: "arn:aws:ssm:us-east-1::parameter/aws/service/*"
+              - Effect: Allow
+                Action:
+                  - lambda:ListLayerVersions
+                  - lambda:DeleteLayerVersion
+                Resource: "*" 
+                Condition: 
+                  ForAllValues:StringLike:
+                    lambda:Layer: 
+                      "arn:aws:lambda:us-east-1:971294478073:layer:python-ldap3:*"
+              - Effect: Allow
+                Action: 
+                  - s3:CreateBucket
+                Resource: "arn:aws:s3:::ldap3-layer-us-east-1-971294478073"
+              - Effect: Allow
+                Action: 
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                Resource: "arn:aws:s3:::ldap3-layer-us-east-1-971294478073/*"
+              - Effect: Allow
+                Action: 
+                  - s3:DeleteBucket
+                Resource: "arn:aws:s3:::ldap3-layer-us-east-1-971294478073"
+              - Effect: Allow
+                Action:
+                  - iam:PassRole
+                Resource: !GetAtt RoleForLambdaLayerCreator.Arn
+      Tags: 
+        - Key: AWS-Starter-Kit-Name
+          Value: Windows-Workspaces-Add-On
+# This function creates a Lambda Layer for Python-LDAP3 which will serve as the mechanism to communicate with the EC2-based AD.
+# The function deploys an S3 Bucket to store the lambda layer temporarily, an EC2 instance that runs a user data script which 
+# creates the Lambda Layer, creates the Lambda Layer, then once the Lambda Layer responds, it deletes the EC2 instance and the S3 bucket.
+  CreateLambdaLayerLambdaFunction:
+    # checkov:skip=CKV_AWS_115:This is a Lambda-backed CloudFormation Custom Resource and only executes once
+    # checkov:skip=CKV_AWS_116:This is a Lambda-backed CloudFormation Custom Resource and only executes once, does not need a Dead Letter Queue
+    # checkov:skip=CKV_AWS_117:This is a Lambda-backed CloudFormation Custom Resource and only executes once and only requires access to AWS API
+    Metadata:
+      cdk_nag:
+        rules_to_suppress:
+          - id: AwsSolutions-L1
+            reason: "Python 3.12 not stable with Python-LDAP3, 3.11 is latest stable version"
+      cfn_nag:
+        rules_to_suppress:
+          - id: W28
+            reason: "Resource will not be replaced in an update" 
+          - id: W58
+            reason: "Lambda Function has permission to write to CloudWatchLogs, see LoggingConfig property lines 439-443"
+          - id: W89
+            reason: "This is a Lambda-backed CloudFormation Custom Resource and only executes once and only requires access to AWS API"
+          - id: W92
+            reason: "This is a Lambda-backed CloudFormation Custom Resource and only executes once" 
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: This Lambda function creates the Lambda Layer for WorkSpaces Automation
+      FunctionName: workspaces-create-lambda-layer
+      Runtime: python3.11
+      Timeout: 480
+      Environment: 
+        Variables: 
+          dc1SubnetId: 
+            Fn::ImportValue: "Windows-Domain-DC-Subnet1-ID"
+          dcSecurityGroupId: 
+            Fn::ImportValue: "Windows-Domain-DC-to-DC-Security-Group-ID"
+          latestAmiParam: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+          ec2InstanceProfile: !Ref LambdaLayerCreatorInstanceProfile
+          layerBucketName: !Sub ldap3-layer-${AWS::Region}-${AWS::AccountId}
+          region: !Ref AWS::Region
+      KmsKeyArn: !ImportValue  "Windows-Domain-KMS-Key-Arn"
+      Role: !GetAtt CreateLambdaLayerExecutionRole.Arn
+      LoggingConfig: 
+        ApplicationLogLevel: INFO
+        LogFormat: JSON 
+        LogGroup: !Ref WorkspacesStarterKitLogGroup
+        SystemLogLevel: INFO
+      Handler: index.lambda_handler
+      Tags: 
+        - Key: AWS-Starter-Kit-Name
+          Value: Windows-Workspaces-Add-On
+      Code: 
+        ZipFile: |
+          """This file programmatically creates a lambda layer with the python-ldap3 library. 
+          It creates an EC2 instance which packages up the lambda layer, and then uploads it 
+          to an S3 bucket. It the creates the Lambda Layer, and sends the ARN of the Lambda Layer as the phys_id.
+          After the Lambda Layer has been uploaded, it deletes the EC2 instance and S3 Bucket."""
+          import os
+          import logging
+          import time
+          import boto3
+          import cfnresponse
+          
+          logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+          logger = logging.getLogger(__name__)
+          
+          def lambda_handler(event, context):
+              """This is the Lambda Handler Function"""
+              try: 
+                  latest_ami_param = os.environ.get('latestAmiParam')
+                  sg_id=os.environ.get('dcSecurityGroupId')
+                  ec2_instance_profile=os.environ.get('ec2InstanceProfile')
+                  subnet_id=os.environ.get('dc1SubnetId')
+                  layer_bucket_name=os.environ.get('layerBucketName')
+                  bucket_region=os.environ.get('region')
+                  kms_key=os.environ.get('kmsKeyArn')
+                  resolved_ami=os.environ.get('resolvedAmi')
+                  print(f'Latest AMI is {resolved_ami}')
+                  if event["RequestType"] == "Create":
+                      response_data = {}
+                      phys_id=''
+                      ami_id = get_latest_ami(latest_ami_param)
+                      logger.info(f'Latest AL2023 Linux AMI is {ami_id}')
+                      s3_status = create_s3_bucket(layer_bucket_name,bucket_region)
+                      logger.info(s3_status)
+                      if s3_status == 'S3_BUCKET_CREATED':
+                          ec2_response, ec2_instance_id = create_ldap3_lambda_layer(subnet_id,sg_id,ami_id,layer_bucket_name,ec2_instance_profile)
+                          logger.info(ec2_response)
+                          logger.info(f'EC2 Lambda Layer Creator Instance ID is {ec2_instance_id}')
+                          if ec2_response == 'EC2_INSTANCE_CREATED':
+                              verify_lambda, layer_arn = verify_ldap3_layer()
+                              logger.info(verify_lambda)
+                              logger.info(f'ARN of Lambda Layer is {layer_arn}')
+                              if verify_lambda == 'LAMBDA_LAYER_DEPLOYED':
+                                  phys_id=(layer_arn)
+                                  delete_s3_bucket(layer_bucket_name)
+                                  delete_ec2_instance(ec2_instance_id)
+                      cfnresponse.send(event, context, cfnresponse.SUCCESS, response_data, phys_id)
+                                         
+                  elif event["RequestType"] == "Delete":
+                      response=delete_lambda_layers()
+                      if response == 'LAMBDA_LAYER_DELETED':
+                          response_data = {'SUCCESS': 'LAMBDA LAYER DELETED'}
+                      cfnresponse.send(event, context, cfnresponse.SUCCESS, response_data)
+          
+              except Exception as e:
+                  response_data = {}
+                  cfnresponse.send(event, context, cfnresponse.FAILED, response_data)
+          
+          def create_s3_bucket(layer_bucket_name, bucket_region):
+              """This function creates the S3 bucket for the Lambda Layer"""
+              client = boto3.client('s3', region_name=bucket_region)
+              response = client.create_bucket(
+                  Bucket=layer_bucket_name,
+              )
+              if response['ResponseMetadata']['HTTPStatusCode'] == 200:
+                  fn_response = 'S3_BUCKET_CREATED'
+              return fn_response
+          
+          def get_latest_ami(latest_ami_param):
+              """This function gets the latest AMI for the Lambda Layer"""
+              ssmclient = boto3.client('ssm')
+              response = ssmclient.get_parameter(
+                  Name=latest_ami_param
+              )
+              ec2_ami = response['Parameter']['Value']
+              return ec2_ami
+          
+          def create_ldap3_lambda_layer(subnet_id,sg_id,ami_id,layer_bucket_name,ec2_instance_profile):
+              """This function runs an EC2 instance which automates the creation of the LDAP3 Lambda Layer"""
+              ec2client = boto3.client('ec2')
+              user_data_script = "#!/bin/bash\nsudo yum update -y\nsudo yum install python3.11 -y\nsudo yum install python3.11-pip -y\npip3.11 install virtualenv\nvirtualenv /home/ec2-user/lambda\nsource /home/ec2-user/lambda/bin/activate\npip3.11 install boto3\npip3.11 install ldap3\ndeactivate\nmkdir -p /home/ec2-user/layer/python\ncp -r /home/ec2-user/lambda/lib /home/ec2-user/layer/python\ncd /home/ec2-user/layer\nzip -r ldap3-layer.zip . \naws s3api put-object --bucket "+layer_bucket_name+" --key ldap3-layer.zip --body /home/ec2-user/layer/ldap3-layer.zip\naws lambda publish-layer-version --layer-name python-ldap3 --description \"Python LDAP3 Library from https://ldap3.readthedocs.io/en/latest/welcome.html installed as a lambda layer via pip\" --content S3Bucket="+layer_bucket_name+",S3Key=ldap3-layer.zip --compatible-runtimes=\"python3.11\" --compatible-architectures \"x86_64\" --license-info \"LGPL-3.0-or-later\""
+              ec2response = ec2client.run_instances(
+                  ImageId=ami_id,
+                  InstanceType='t3.micro',
+                  MaxCount=1,
+                  MinCount=1,
+                  SecurityGroupIds=[
+                      sg_id
+                  ],
+                  SubnetId=subnet_id,
+                  IamInstanceProfile={
+                      'Name': ec2_instance_profile
+                  },
+                  TagSpecifications=[
+                      {
+                          'ResourceType': 'instance',
+                          'Tags': [
+                              {
+                                  'Key': 'Creator',
+                                  'Value': 'workspaces-create-lambda-layer'
+                              },
+                              {
+                                  'Key': 'Name',
+                                  'Value': 'Lambda-Layer-Creator-Instance'
+                              },
+                              {
+                                  'Key': 'Information',
+                                  'Value': 'This instance creates a Lambda Layer as part of the Workspaces-Starter-Kit and probably should have been deleted. If The Workspaces Starter Kit is running properly, this instance can be deleted.'
+                              }
+                          ]
+                      }
+                  ],
+                  UserData=user_data_script
+              )
+              instance_id = ec2response['Instances'][0]['InstanceId']
+              if len(instance_id) > 0:
+                  fn_return = 'EC2_INSTANCE_CREATED'
+                  return fn_return, instance_id
+              else: 
+                  fn_return = 'EC2_INSTANCE_CREATION_FAILED'
+                  instance_id = 'NONE'
+                  return fn_return
+          
+          def verify_ldap3_layer():
+              """This function verifies that the LDAP3 Lambda Layer has been created"""
+              client = boto3.client('lambda')
+              for x in range(0,100):
+                  logger.info('Waiting for Lambda Layer...')
+                  time.sleep(5)
+                  response = client.list_layer_versions(
+                      LayerName='python-ldap3'
+                  )
+                  if response['LayerVersions']:
+                      fn_return = 'LAMBDA_LAYER_DEPLOYED'
+                      layer_arn = response['LayerVersions'][0]['LayerVersionArn']
+                      return fn_return, layer_arn
+                      break
+              fn_return = 'LAMBDA_LAYER_DEPLOYMENT_FAILED'
+              layer_arn = 'NONE'
+              return fn_return, layer_arn
+          
+          def delete_s3_bucket(layer_bucket_name):
+              """This function deletes the S3 bucket for the Lambda Layer"""
+              try:
+                  client = boto3.client('s3')
+                  client.delete_object(
+                      Bucket=layer_bucket_name, 
+                      Key='ldap3-layer.zip'
+                  )
+                  client.delete_bucket(
+                      Bucket=layer_bucket_name
+                  )
+                  logger.info('S3 Bucket Deleted')
+              except Exception as e:
+                  logger.info(e)
+              
+          def delete_ec2_instance(instance_id):
+              try:
+                  """This function deletes the EC2 instance which created the Lambda Layer"""
+                  client=boto3.client('ec2')
+                  response = client.terminate_instances(
+                      InstanceIds=[
+                          instance_id
+                      ]
+                  ) 
+                  if response['ResponseMetadata']['HTTPStatusCode'] == 200:
+                      logger.info('EC2 Instance Terminated')
+              except Exception as e:
+                  logger.info(e)
+          
+          def delete_lambda_layers():
+              """This function deletes all possible versoions of the LDAP3 Lambda Layer"""
+              client=boto3.client('lambda')
+              response=client.list_layer_versions(
+                  LayerName='python-ldap3'
+              )
+              for item in response['LayerVersions']:
+                  layer_version=item['LayerVersionArn']
+                  layer_version=layer_version.split(":")
+                  layer_version=int(layer_version[7])
+                  logger.info(f'Deleting Lambda Layer Version {str(layer_version)}')
+                  del_response=client.delete_layer_version(
+                      LayerName='python-ldap3',
+                      VersionNumber=layer_version
+                  )
+                  if del_response['ResponseMetadata']['HTTPStatusCode'] == 204:
+                      logger.info('Lambda Layer Version Deleted')
+                      fn_return = "LAMBDA_LAYER_DELETED"
+                      return fn_return 
+                  else: 
+                      fn_return = "FAILED_TO_DELETE_LAMDBA_LAYER"
+                      logger.info('Lambda Layer Version Not Deleted')
+                      return fn_return
+# This security group attaches to all of the Lambda functions which have to interface with the EC2 based Active Directory.
+  WorkspacesLambdaSecurityGroup: 
+    Metadata: 
+      cfn_nag: 
+        rules_to_suppress: 
+          - id: W40
+            reason: "Lambda function requires internet egress to AWS public services."
+          - id: W5
+            reason: "Lambda function requires internet egress to AWS public services."
+          - id: W28
+            reason: "Resource will not be replaced in an update" 
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: Workspaces-Starter-Kit-Lambda-VPC-SecurityGroup
+      GroupDescription: Allows Workspaces Automation Lambda Function to access VPC DCs and AWS Public Services
+      VpcId: !ImportValue Windows-Domain-VPC-ID
+      SecurityGroupEgress:
+      - IpProtocol: -1
+        CidrIp: 0.0.0.0/0
+        Description: Outbound traffic
+# This is the invoker for the Workspaces Activation Lambda Function.
+  WorkspacesActivation: 
+    Type: Custom::WorkspacesActivation
+    Properties: 
+      ServiceToken: !GetAtt WorkspacesActivationLambdaFunction.Arn 
+      DeploymentType: !Ref DeploymentType
+      WorkspacesTerminationBehavior: !Ref WorkspacesTerminationBehavior
+      WorkspacesOU: !Ref WorkspacesOU
+      UsersHaveLocalAdminRights: !Ref UsersHaveLocalAdminRights
+      IncludedWindowsVersions: !Ref IncludedWindowsVersions
+      IncludeOffice: !Ref IncludeOffice
+      WorkspacesProtocols: !Ref WorkspacesProtocols
+      WorkSpacesComputeTypes: !Ref WorkSpacesComputeTypes
+# This is the role for the WorkspacesActivation Lambda function.
+  WorkspacesActivationExecutionRole:
+    # checkov:skip=CKV_AWS_111: Directory Service DescribeDirectories must use the resource "*". See https://docs.aws.amazon.com/directoryservice/latest/admin-guide/IAM_Auth_Access_Overview.html#CreatingIAMPolicies_DS 
+    # checkov:skip=CRV_AWS_111: WorkSpaces must use the resource "*". See https://docs.aws.amazon.com/workspaces/latest/adminguide/workspaces-access-control.html
+    # checkov:skip=CKV_AWS_108: Systems Manager Parameters must use the resource "*" for creation. See https://docs.aws.amazon.com/systems-manager/latest/userguide/security_iam_id-based-policy-examples.html
+    # checkov:skip=CKV_AWS_116: Systems Manager DescribeParameters must use the resource "*" for creation. See https://docs.aws.amazon.com/systems-manager/latest/userguide/security_iam_id-based-policy-examples.html
+    Type: AWS::IAM::Role
+    Metadata:
+      cdk_nag:
+        rules_to_suppress:
+          - id: AwsSolutions-IAM5
+            reason: "Directory Service DescribeDirectories must use the resource *. See https://docs.aws.amazon.com/directoryservice/latest/admin-guide/IAM_Auth_Access_Overview.html#CreatingIAMPolicies_DS"
+          - id: AwsSolutions-IAM5
+            reason: "WorkSpaces must use the resource *. See https://docs.aws.amazon.com/workspaces/latest/adminguide/workspaces-access-control.html"
+      cfn_nag: 
+        rules_to_suppress: 
+          - id: W11
+            reason: "Directory Service resources must use the resource *"
+          - id: W11
+            reason: "WorkSpaces Service resources must use the resource * See https://docs.aws.amazon.com/workspaces/latest/adminguide/workspaces-access-control.html"
+          - id: W11
+            reason: "PutParameter resources must use the resource * See https://docs.aws.amazon.com/workspaces/latest/adminguide/workspaces-access-control.html"
+          - id: W28
+            reason: "Resource will not be replaced in an update" 
+          - id: F38
+            reason: WorkSpaces PassRole must use the resourcee * See https://docs.aws.amazon.com/workspaces/latest/adminguide/workspaces-access-control.html"
+          - id: W76
+            reason: "The complexity of the role is based on the security parameters needed for the role"
+          - id: W92
+            reason: "Lambda function runs only on create, update or delete and concurrency reservations do not apply"
+    Properties:
+      RoleName: !Sub Workspaces-Activation-FunctionRole-${AWS::Region}
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: "/"
+      Policies:
+        - PolicyName: Workspaces-Activation-Lambda-Policy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !GetAtt WorkspacesStarterKitLogGroup.Arn
+              - Effect: Allow
+                Action:
+                  - ds:AuthorizeApplication 
+                  - ds:UnauthorizeApplication 
+                  - ds:DescribeDirectories
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - workspaces:RegisterWorkspaceDirectory 
+                  - workspaces:DeregisterWorkspaceDirectory 
+                  - workspaces:DescribeWorkspaceDirectories 
+                  - workspaces:ModifyWorkspaceCreationProperties 
+                  - workspaces:DescribeWorkspaceBundles 
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - iam:GetRole 
+                  - iam:CreateRole
+                  - iam:AttachRolePolicy
+                Resource: !Sub "arn:aws:iam::${AWS::AccountId}:role/workspaces_DefaultRole"
+              - Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:Encrypt
+                  - kms:GenerateDataKey
+                  - kms:DescribeKey
+                Resource: 
+                  - !ImportValue "Windows-Domain-KMS-Key-Arn"
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !ImportValue "AD-Connector-Secret-ARN"
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: !ImportValue "Windows-Domain-SNS-Topic"
+              - Effect: Allow
+                Action:
+                  - ec2:CreateNetworkInterface
+                  - ec2:CreateTags
+                  - ec2:CreateSecurityGroup
+                  - ec2:DescribeInternetGateways
+                  - ec2:DescribeSecurityGroups
+                  - ec2:DescribeRouteTables
+                  - ec2:DescribeVpcs
+                  - ec2:DescribeSubnets
+                  - ec2:DescribeNetworkInterfaces
+                  - ec2:AuthorizeSecurityGroupEgress
+                  - ec2:AuthorizeSecurityGroupIngress
+                  - ec2:DeleteSecurityGroup
+                  - ec2:DeleteNetworkInterface
+                  - ec2:RevokeSecurityGroupEgress
+                  - ec2:RevokeSecurityGroupIngress
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                Resource: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/workspaces/*"
+              - Effect: Allow
+                Action:
+                  - ssm:DescribeParameters
+                  - ssm:DeleteParameter
+                  - ssm:PutParameter
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - iam:PassRole
+                Resource: !Sub "arn:aws:iam::${AWS::AccountId}:role/workspaces_DefaultRole"  
+                Condition:
+                  StringEquals:
+                    iam:PassedToService: workspaces.amazonaws.com
+      Tags: 
+        - Key: AWS-Starter-Kit-Name
+          Value: Windows-Workspaces-Add-On
+# This is the Workspaces Activation Lambda function. It sets up Workspaces by activating the Workspaces directory, creates 
+# SSM Parameters based on the configuration input parameters of this template, and creates the corresponding groups in the 
+# EC2 based Active Directory. 
+  WorkspacesActivationLambdaFunction:
+    # checkov:skip=CKV_AWS_115:This is a Lambda-backed CloudFormation Custom Resource and only executes on Create, Update or Delete and requires no concurrency
+    # checkov:skip=CKV_AWS_116:This is a Lambda-backed CloudFormation Custom Resource and only executes once, does not need a Dead Letter Queue 
+    Type: AWS::Lambda::Function
+    Metadata:
+      cdk_nag:
+        rules_to_suppress:
+          - id: AwsSolutions-L1
+            reason: "Python 3.12 not stable with Python-LDAP3, 3.11 is latest stable version"
+      cfn_nag:
+        rules_to_suppress:
+          - id: W58
+            reason: "Lambda Function has permission to write to CloudWatchLogs, see LoggingConfig property lines 863-867"
+          - id: W92
+            reason: "This is a Lambda-backed CloudFormation Custom Resource and only executes on Create, Update or Delete and requires no concurrency" 
+    Properties:
+      Description: This Lambda function activates the directory for workspaces and sets up parameters and AD groups.
+      FunctionName: workspaces-activation
+      Runtime: python3.11
+      Timeout: 300
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref WorkspacesLambdaSecurityGroup
+        SubnetIds:
+          - Fn::ImportValue: "Windows-Domain-DC-Subnet1-ID"
+          - Fn::ImportValue: "Windows-Domain-DC-Subnet2-ID"
+      Layers: 
+        - !Ref CreateLambdaLayer
+      KmsKeyArn: !ImportValue  "Windows-Domain-KMS-Key-Arn"
+      Environment: 
+        Variables: 
+          accountId: !Ref AWS::AccountId
+          adOuForWorkspaces: !Ref WorkspacesOU
+          localAdminRights: !Ref UsersHaveLocalAdminRights
+          configuredProtocols: !Ref WorkspacesProtocols
+          computeTypes: !Ref WorkSpacesComputeTypes
+          includeOffice: !Ref IncludeOffice
+          includedWindowsVersions: !Ref IncludedWindowsVersions
+          deploymentType: !Ref DeploymentType
+          adConnId: 
+            Fn::ImportValue: "Directory-Connector-ID"
+          clientSubnet1: 
+            Fn::ImportValue: "Windows-Domain-Client-Subnet-1-ID"
+          clientSubnet2: 
+            Fn::ImportValue: "Windows-Domain-Client-Subnet-2-ID"
+          dc1Ip: 
+            Fn::ImportValue: "Windows-Domain-DC1-IP"
+          dc2Ip: 
+            Fn::ImportValue: "Windows-Domain-DC2-IP"
+          domainName:
+            Fn::ImportValue: "Windows-Domain-Name"
+          snsTopic:
+            Fn::ImportValue: "Windows-Domain-SNS-Topic"
+          kmsKey:
+            Fn::ImportValue: "Windows-Domain-KMS-Key-Arn"
+      Role: !GetAtt WorkspacesActivationExecutionRole.Arn
+      LoggingConfig: 
+        ApplicationLogLevel: INFO
+        LogFormat: JSON 
+        LogGroup: !Ref WorkspacesStarterKitLogGroup
+        SystemLogLevel: INFO
+      Handler: index.lambda_handler
+      Tags: 
+        - Key: AWS-Starter-Kit-Name
+          Value: Windows-Workspaces-Add-On
+      Code: 
+        ZipFile: |
+          import boto3
+          import os
+          import time
+          import json
+          from ldap3 import Server, Connection, ALL
+          import cfnresponse 
+          import itertools
+          import logging
+          logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+          logger = logging.getLogger(__name__) 
+
+          def lambda_handler(event, context):
+              try:
+                  ad_ou=os.environ.get('adOuForWorkspaces')
+                  local_admin_rights=os.environ.get('localAdminRights')
+                  deploy_env = os.environ.get('deploymentType')
+                  dir_id = os.environ.get('adConnId')
+                  subnet1 = os.environ.get('clientSubnet1')
+                  subnet2 = os.environ.get('clientSubnet2')
+                  configured_include_office = os.environ.get('includeOffice')
+                  configured_win_versions = os.environ.get('includedWindowsVersions')
+                  configured_protocols = os.environ.get('configuredProtocols')
+                  configured_compute_types = os.environ.get('computeTypes')
+                  sns_topic = os.environ.get('snsTopic')
+                  aws_acct = os.environ.get('accountId')
+                  dc1_ip = os.environ.get('dc1Ip')
+                  dc2_ip = os.environ.get('dc2Ip')
+                  win_dom = os.environ.get('domainName')
+                  dom_nm = win_dom.split('.',1)
+                  dom = dom_nm[0]
+                  tld = dom_nm[1]
+                  kms_key = os.environ.get('kmsKey')
+                  if ad_ou=="":
+                      ad_ou="NOT_SPECIFIED"
+                  if configured_include_office == "-Yes-":
+                      include_office = "YES"
+                  if configured_include_office == "-No-":
+                      include_office = "NO"
+                  if configured_win_versions == "Server 2022":
+                      ws_win_versions = ["Server 2022"]
+                  if configured_win_versions == "Server 2022 and Server 2019":
+                      ws_win_versions = ["Server 2022","Server 2019"]
+                  if configured_win_versions == "Server 2022 and Server 2019 and Server 2016":
+                      ws_win_versions = ["Server 2022","Server 2019","Server 2016"]
+                  if configured_protocols == "WSP":
+                      protocols = ["WorkSpaces Streaming Protocol"]
+                  if configured_protocols == "PCoIP":
+                      protocols = ["PCoIP"]
+                  if configured_protocols == "BOTH":
+                      protocols = ["WorkSpaces Streaming Protocol","PCoIP"]
+                  if configured_compute_types == "Standard":
+                      compute_types = ["Standard"]
+                  if configured_compute_types == "Standard and Performance":
+                      compute_types = ["Standard","Performance"]
+                  if configured_compute_types == "Standard and Performance and Power":
+                      compute_types = ["Standard","Performance","Power"]
+                  if configured_compute_types == "Standard and Performance and Power and PowerPro":
+                      compute_types = ["Standard","Performance","Power","PowerPro"]
+                  if event["RequestType"] == "Create":
+                      logger.info(f'Compute Types is {compute_types} for Windows Version {ws_win_versions} with {protocols} protocols and Office is {include_office}')
+                      response_data = {}
+                      create_workspaces_parameters(ws_win_versions,include_office,protocols,compute_types,deploy_env,kms_key)
+                      response_data.update(register_workspace_directory(dir_id,subnet1,subnet2))
+                      time.sleep(10)
+                      set_workspaces_addl_settings(ad_ou,dir_id,local_admin_rights,dom,tld)
+                      conn_dc, ldap_status = test_ldap(dc1_ip,dc2_ip,dom)
+                      if ldap_status == 'REACHABLE':
+                          create_ad_groups(conn_dc,dom,tld)
+                      phys_id = get_ws_dir_reg_code(dir_id)
+                      logger.info(f'Cloudformation Response phys_id is {phys_id}')
+                      logger.info(f'Cloudformation Response response_data is {response_data}')
+                      cfnresponse.send(event, context, cfnresponse.SUCCESS, response_data, phys_id)
+
+                  elif event["RequestType"] == "Update":
+                      response_data = {}
+                      group_list=get_group_list_for_update()
+                      logger.info(f'List of groups is {group_list}')
+                      conn_dc, ldap_status = test_ldap(dc1_ip,dc2_ip,dom)
+                      if ldap_status=='REACHABLE':
+                          logger.info(f'Active Directory is {ldap_status} at {conn_dc}')
+                          groups_to_delete=[]
+                          for group in group_list:
+                              logger.info(f'Checking {group} in Active Directory for any members')
+                              ad_group_members=get_ad_group_members(conn_dc,dom,tld,group)
+                              num_members=(len(ad_group_members))
+                              if num_members==0:
+                                  logger.info(f'There are {num_members} Active Directory users in {group} and group is ok to delete')
+                                  groups_to_delete.append(group)
+                              if num_members>0:
+                                  logger.info(f'{group} contains Active Directory users and will not be deleted')
+                      logger.info(f'The following parameters will be deleted from Parameter Store:{groups_to_delete}')
+                      del_params=delete_parameters_for_update(groups_to_delete)
+                      if del_params=="DELETED_PARAMETERS":
+                          del_groups, not_del_groups=delete_ad_groups_for_update(conn_dc,dom,tld,groups_to_delete)
+                          logger.info(f'Deleted {del_groups} and did not delete {not_del_groups}')
+                          logger.info("Proceeding with Updates to Paramater Store Parameters and Active Directory Groups")
+                          create_workspaces_parameters(ws_win_versions,include_office,protocols,compute_types,deploy_env,kms_key)
+                          set_workspaces_addl_settings(ad_ou,dir_id,local_admin_rights,dom,tld)
+                          conn_dc, ldap_status = test_ldap(dc1_ip,dc2_ip,dom)
+                          if ldap_status == 'REACHABLE':
+                              create_ad_groups(conn_dc,dom,tld)
+                          response_data['UPDATES']='COMPLETED'
+                          phys_id = get_ws_dir_reg_code(dir_id)
+                          logger.info(f'Cloudformation response data is {response_data}')
+                          cfnresponse.send(event, context, cfnresponse.SUCCESS, response_data, phys_id)
+
+                  elif event["RequestType"] == "Delete":
+                      response_data = {}
+                      group_list=get_group_list_for_update()
+                      logger.info(f'List of groups is {group_list}')
+                      conn_dc, ldap_status = test_ldap(dc1_ip,dc2_ip,dom)
+                      if ldap_status=='REACHABLE':
+                          logger.info(f'Active Directory is {ldap_status} at {conn_dc}')
+                          groups_to_delete=[]
+                          groups_to_not_delete=[]
+                          for group in group_list:
+                              logger.info(f'Checking {group} in Active Directory for any members')
+                              ad_group_members=get_ad_group_members(conn_dc,dom,tld,group)
+                              num_members=(len(ad_group_members))
+                              if num_members==0:
+                                  logger.info(f'There are {num_members} Active Directory users in {group} and group is ok to delete')
+                                  groups_to_delete.append(group)
+                              if num_members>0:
+                                  logger.info(f'{group} contains Active Directory users and is not able to be deleted')
+                                  groups_to_not_delete.append(group)
+                      conn_dc, ldap_status = test_ldap(dc1_ip,dc2_ip,dom)
+                      if ldap_status == 'REACHABLE':
+                          delete_ad_groups_for_update(conn_dc,dom,tld,groups_to_delete)     
+                          delete_workspaces_parameters()
+                      if len(groups_to_not_delete)==0:
+                          deregister_workspace_directory(dir_id)
+                          response_data['WorkSpacesAutomationDeletion']='COMPLETE'
+                          logger.info("Workspaces Automation Deletion Complete")
+                          alert_type="STACK_DELETED"
+                          alert_status=send_alert_to_admin(aws_acct,sns_topic,alert_type)
+                      elif len(groups_to_not_delete)>0:
+                          response_data['WorkSpacesAutomationDeletion']='INCOMPLETE'
+                          logger.info("Workspaces Automation Deletion Incomplete")
+                          logger.info(f'Groups Not Deleted are {groups_to_not_delete}')
+                          logger.info(f'Directory ID {dir_id} remains activated for Workspaces and should be manually deactivated through the Workspaces Console. You may have already deleted all of your Workspaces, but the Starter Kit takes extra precautions before deleting Workspaces.')
+                          alert_type="STACK_DELETION_INCOMPLETE"
+                          alert_status=send_alert_to_admin(aws_acct,sns_topic,alert_type)
+                      cfnresponse.send(event, context, cfnresponse.SUCCESS, response_data)
+
+              except Exception as e:
+                  response_data = e
+                  cfnresponse.send(event, context, cfnresponse.FAILED, response_data)
+
+          def create_workspaces_parameters(ws_win_versions,include_office,protocols,compute_types,deploy_env,kms_key):
+              """This function creates Parameters in Systems Manager Parameter store for the current bundles and those parameters are used by the workspaces add groups lambda function for the AD group names and descriptions"""
+              wsclient=boto3.client('workspaces')
+              ssmclient=boto3.client('ssm')
+              if deploy_env=="TEST":
+                  usage_opts = ["HOURLY"]
+              if deploy_env=="PRODUCTION":
+                  usage_opts = ["HOURLY","MONTHLY"]
+              include_office = "NO"
+              l = [ws_win_versions, compute_types, protocols, usage_opts]
+              srch_perms=list(itertools.product(*l))
+              paginator = wsclient.get_paginator('describe_workspace_bundles')
+              response_iterator = paginator.paginate(
+                  Owner='AMAZON'
+              )
+              for page in response_iterator:
+                  bundles=page['Bundles']
+                  for bundle in bundles:
+                      if include_office=="NO": 
+                          bundle_nm=bundle['Name']
+                          bundle_desc=bundle['Description']
+                          bundle_id=bundle['BundleId']
+                          for perm in srch_perms:
+                              perm=list(perm)
+                              if perm[0] in bundle_desc and perm[1].upper()==bundle['ComputeType']['Name'] and perm[2] in bundle_desc and "Office" not in bundle_nm:
+                                  win_version=perm[0]
+                                  win_version=win_version.replace(" ","-")
+                                  bundle_cpu_type=perm[1].upper()
+                                  bundle_protocol=perm[2]
+                                  if bundle_protocol=="WorkSpaces Streaming Protocol":
+                                      bundle_protocol="WSP"
+                                  bundle_usage_opt=perm[3]
+                                  logger.info(f'{bundle_id} found for {perm}')
+                                  descr_param_name=f'/workspaces/descriptions/Workspaces-{bundle_cpu_type}-{bundle_protocol}-{bundle_usage_opt}-{win_version}'
+                                  descr_param_value=f'{bundle_desc}. ADDING MEMBERS TO THIS GROUP CREATES AN AMAZON WORKSPACE FOR THE USER WHICH INCURS A {bundle_usage_opt} COST. See the WorkSpaces pricing guide at https://aws.amazon.com/workspaces/pricing/ for more information.'
+                                  bundle_id_param_name=f'/workspaces/bundle-ids/Workspaces-{bundle_cpu_type}-{bundle_protocol}-{bundle_usage_opt}-{win_version}'
+                                  bundle_id_param_value=bundle_id
+                                  put_parameters(descr_param_name,descr_param_value,bundle_id_param_name,bundle_id_param_value,kms_key)
+                      if include_office=="YES":
+                          bundle_nm=bundle['Name']
+                          bundle_desc=bundle['Description']
+                          bundle_id=bundle['BundleId']
+                          for perm in perms:
+                              perm=list(perm)
+                              if perm[0] in bundle_desc and perm[1].upper()==bundle['ComputeType']['Name'] and perm[2] in bundle_desc and "Office" in bundle_nm:
+                                  win_version=perm[0]
+                                  win_version=win_version.replace(" ","-")
+                                  bundle_cpu_type=perm[1].upper()
+                                  bundle_protocol=perm[2]
+                                  bundle_usage_opt=perm[3]
+                                  logger.info(f'{bundle_id} found for {perm}')
+                                  descr_param_name=f'/workspaces/descriptions/Workspaces-{bundle_cpu_type}-{bundle_protocol}-{bundle_usage_opt}-{win_version}'
+                                  descr_param_value=f'{bundle_desc}. ADDING MEMBERS TO THIS GROUP CREATES AN AMAZON WORKSPACE FOR THE USER WHICH INCURS A {bundle_usage_opt} COST. See the WorkSpaces pricing guide at https://aws.amazon.com/workspaces/pricing/ for more information.'
+                                  bundle_id_param_name=f'/workspaces/bundle-ids/Workspaces-{bundle_cpu_type}-{bundle_protocol}-{bundle_usage_opt}-{win_version}'
+                                  bundle_id_param_value=bundle_id
+                                  put_parameters(descr_param_name,descr_param_value,bundle_id_param_name,bundle_id_param_value,kms_key)
+          
+          def put_parameters(descr_param_name,descr_param_value,bundle_id_param_name,bundle_id_param_value,kms_key):
+              ssmclient=boto3.client('ssm')
+              logger.info(f'Description Parameter Name is {descr_param_name}')
+              logger.info(f'Description Parmeter Value is {descr_param_value}')
+              logger.info(f'Bundle ID Parameter Name is {bundle_id_param_name}')
+              logger.info(f'Bundle ID Parameter Value is {bundle_id_param_value}')
+              ssmresponse=ssmclient.put_parameter(
+                  Name=descr_param_name,
+                  Description='Used by WorkSpaces Automation - DO NOT DELETE',
+                  KeyId=kms_key,
+                  Type='SecureString',
+                  Value=descr_param_value,
+                  Overwrite=True
+              )
+              logger.info(ssmresponse)
+              if ssmresponse['ResponseMetadata']['HTTPStatusCode'] == 200:
+                  logger.info("PARAMETER_CREATED")
+              ssmresponse=ssmclient.put_parameter(
+                  Name=bundle_id_param_name,
+                  Description='Used by WorkSpaces Automation - DO NOT DELETE',
+                  KeyId=kms_key,
+                  Type='SecureString',
+                  Value=bundle_id_param_value,
+                  Overwrite=True
+               )
+              if ssmresponse['ResponseMetadata']['HTTPStatusCode'] == 200:
+                  logger.info(ssmresponse)
+                  logger.info("PARAMETER CREATED")
+
+          def test_ldap(dc1_ip,dc2_ip,dom):
+              """This function testes to make sure that we are able to interface with the Active Directory before we start trying to send it any commands"""
+              dclist = [dc1_ip,dc2_ip]
+              smclient = boto3.client('secretsmanager')
+              secret_name='AdConnectorCreds' #nosec - no credentials hardcoded - credentials stored and retreived from Secrets Manager
+              smresponse = smclient.get_secret_value(
+                  SecretId=secret_name
+              )
+              creds = smresponse['SecretString']
+              creds=json.loads(creds)
+              ldap_user = creds['username']
+              ad_user = f'{dom}\\{ldap_user}'
+              ldap_pw = creds['password']
+              for dc in dclist:
+                  logger.info('Connecting to '+dc)
+                  conn = Connection(dc, ad_user, ldap_pw, auto_bind=True)
+                  if conn.bind():
+                      ldap = 'REACHABLE'
+                      return dc, ldap
+                      break
+                  else: 
+                      ldap = 'NOT_REACHABLE' 
+                      dc='NONE'
+                      return dc, ldap
+  
+          def register_workspace_directory(dir_id,subnet1,subnet2):
+              """This function registers the AD Connector for Workspaces"""
+              check_workspaces_role()
+              client = boto3.client('workspaces')
+              response_data = {}
+              logger.info("Registering AD Connector as a Workspaces Directory")
+              response = client.register_workspace_directory(
+                  DirectoryId=dir_id,
+                  SubnetIds=[subnet1,subnet2],
+                  EnableWorkDocs=False,
+                  EnableSelfService=False,
+                  Tenancy='SHARED'
+              )
+              response_data[f'Directory ID {dir_id}']='REGISTERED'
+              return response_data
+
+          def set_workspaces_addl_settings(ad_ou,dir_id,local_admin_rights,dom,tld):
+              """This function provides additional settings. It's primarily to set the OU in Active Directory that Workspaces computers will be created in."""
+              logger.info(f'setting additional settings')
+              response_data={}
+              if ad_ou=="NOT_SPECIFIED" and local_admin_rights=="-Yes-":
+                  logger.info("Workspaces Additional Settings remain at defaults")
+              if ad_ou=="NOT_SPECIFIED" and local_admin_rights=="-No-":
+                  logger.info("AD OU is not specified, Setting Local Admin Rights to False")
+                  wsclient=boto3.client('workspaces')
+                  wsresponse=wsclient.modify_workspace_creation_properties(
+                      ResourceId=dir_id,
+                      WorkspaceCreationProperties={
+                          'UserEnabledAsLocalAdministrator': False
+                      }
+                  )
+              if ad_ou!="NOT_SPECIFIED" and local_admin_rights=="-Yes-":
+                  ad_dn=f'ou={ad_ou},dc={dom},dc={tld}'
+                  logger.info(f'AD OU is {ad_dn}')
+                  logger.info("Setting AD OU")
+                  wsclient=boto3.client('workspaces')
+                  wsresponse=wsclient.modify_workspace_creation_properties(
+                      ResourceId=dir_id,
+                      WorkspaceCreationProperties={
+                          'DefaultOu': ad_dn
+                      }
+                  )
+              if ad_ou!="NOT_SPECIFIED" and local_admin_rights=="-No-":
+                  ad_dn=f'ou={ad_ou},dc={dom},dc={tld}'
+                  logger.info(f'AD OU is {ad_dn}')
+                  logger.info("Setting AD OU and Admin Rights")
+                  wsclient=boto3.client('workspaces')
+                  wsresponse=wsclient.modify_workspace_creation_properties(
+                      ResourceId=dir_id,
+                      WorkspaceCreationProperties={
+                          'UserEnabledAsLocalAdministrator': False,
+                          'DefaultOu': ad_dn
+                      }
+                  )
+
+          def check_workspaces_role():
+              """This function checks to see if role workspaces_DefaultRole exists - it only returns an exception if it doesnt exist"""
+              try: 
+                  client = boto3.client('iam')
+                  logger.info("Checking for Workspaces Default Role in IAM")
+                  response = client.get_role(
+                      RoleName='workspaces_DefaultRole'
+                  )
+                  if response['Role']['RoleName'] == 'workspaces_DefaultRole':
+                      logger.info("workspaces_DefaultRole exists in IAM")
+                      return
+              except Exception as e:
+                  logger.info(e)  #This is marked as info because we will not throw any exception, an exception tells us to create the role
+                  create_workspaces_role()
+
+          def create_workspaces_role():
+              """This function creates the workspaces_DefaultRole role and attaches the managed policies to it """
+              client = boto3.client('iam')
+              logger.info("Creating workspaces_DefaultRole in IAM")
+              response = client.create_role(
+                  RoleName='workspaces_DefaultRole',
+                  AssumeRolePolicyDocument='{ "Version": "2012-10-17", "Statement": [ { "Effect": "Allow", "Principal": { "Service": [ "workspaces.amazonaws.com" ] }, "Action": [ "sts:AssumeRole" ] } ] }',
+                  Description='Default role for WorkSpaces',
+                  Path='/'
+              )
+              logger.info(response)
+              response = client.attach_role_policy(
+                  RoleName='workspaces_DefaultRole',
+                  PolicyArn='arn:aws:iam::aws:policy/AmazonWorkSpacesSelfServiceAccess'
+              )
+              logger.info(response)
+              response = client.attach_role_policy(
+                  RoleName='workspaces_DefaultRole',
+                  PolicyArn='arn:aws:iam::aws:policy/AmazonWorkSpacesServiceAccess'
+              )
+              logger.info(response)
+
+          def get_ws_dir_reg_code(dir_id):
+              """Gets the Workspaces registration code, which is the phys_id for the custom resource. It is
+              also for CUD WorkSpaces alerts and (in future version) customer emails"""
+              client = boto3.client('workspaces')
+              logger.info(f'Getting Workspaces Reg Code for Directory {dir_id}')
+              response = client.describe_workspace_directories(
+                  DirectoryIds=[dir_id]
+              )
+              reg_code = response['Directories'][0]['RegistrationCode']
+              logger.info(f'WorkSpaces Directory Registration Code is {reg_code}')
+              return reg_code
+
+          def deregister_workspace_directory(dir_id):
+              """This functiondee-registers the AD Connector as a workspaces directory"""
+              try: 
+                  wsclient = boto3.client('workspaces')
+                  response_data = {}
+                  wsresponse = wsclient.deregister_workspace_directory(
+                      DirectoryId=dir_id
+                  )
+                  if wsresponse['ResponseMetadata']['HTTPStatusCode']==200:
+                      response_data[f'Deregister {dir_id}']='SUCCESS'
+                  return response_data
+              except Exception as e:
+                  response_data = e
+                  return response_data
+
+          def delete_workspaces_parameters():
+              """This function deletes workspaces from the Active Directory"""
+              ssmclient=boto3.client('ssm')
+              paginator = ssmclient.get_paginator('describe_parameters')
+              response_iterator = paginator.paginate(
+                  ParameterFilters=[
+                      {
+                          'Key': 'Name',
+                          'Option': 'BeginsWith',
+                          'Values': [
+                              'workspaces'
+                          ]
+                      }
+                  ]
+              )
+              response_data={}
+              for page in response_iterator:
+                  parameters_to_delete=page['Parameters']
+                  for param in parameters_to_delete:
+                      param_name = param['Name']
+                      delresponse = ssmclient.delete_parameter(
+                          Name=param_name
+                      )
+                      response_data[param_name]='DELETED'
+                      logger.info(f'Parameter {param_name} deleted')
+              return response_data
+
+          def create_ad_groups(conn_dc,dom,tld):
+              """This function creates an AD group for each Amazon Public Windows 2022 WSP Bundle, except for graphics(g4dn) bundles, which may have quotas for recently opened accounts"""
+              ssmclient = boto3.client('ssm')
+              smclient = boto3.client('secretsmanager')
+              secret_name='AdConnectorCreds' # nosec # no credentials hardcoded - credentials stored and retreived from Secrets Manager
+              smresponse = smclient.get_secret_value(
+                  SecretId=secret_name
+              )
+              creds = smresponse['SecretString']
+              creds=json.loads(creds)
+              ldap_user = creds['username']
+              ad_user = f'{dom}\\{ldap_user}'
+              ldap_pw = creds['password']
+              response_data={}
+              paginator = ssmclient.get_paginator('describe_parameters')
+              response_iterator = paginator.paginate()
+              for page in response_iterator:
+                  params=page['Parameters']
+                  for param in params:
+                      param_name = param['Name']
+                      if param_name.startswith('/workspaces/descriptions/'):
+                          group_name=param_name.split('/')[3]
+                          param_value=ssmclient.get_parameter(
+                              Name=param_name,
+                              WithDecryption=True
+                          )
+                          group_description=param_value['Parameter']['Value']
+                          conn = Connection(conn_dc, ad_user, ldap_pw, auto_bind=True)
+                          ad_dn = f'cn={group_name},cn=Users,dc={dom},dc={tld}'
+                          logger.info(f'Creating group {group_name} in Active Directory')
+                          ad_obj_class = 'Group'
+                          ad_obj_attribs = {
+                              'groupType': 0x80000002,
+                              'description': group_description,
+                              'info': group_description
+                          }
+                          result = conn.add(ad_dn, ad_obj_class, ad_obj_attribs)
+                          if result==True:
+                              response_data[group_name]='CREATED'
+                          elif result!=True:
+                              response_data[group_name]='NOT_CREATED'
+              return response_data
+
+          def delete_ad_groups(conn_dc,dom,tld):
+              """This function deletes the groups from Active Directory"""
+              ssmclient = boto3.client('ssm')
+              smclient = boto3.client('secretsmanager')
+              secret_name='AdConnectorCreds' #nosec # no credentials hardcoded - credentials stored and retreived from Secrets Manager
+              smresponse = smclient.get_secret_value(
+                  SecretId=secret_name
+              )
+              creds = smresponse['SecretString']
+              creds=json.loads(creds)
+              ldap_user = creds['username']
+              ad_user = f'{dom}\\{ldap_user}'
+              ldap_pw = creds['password']
+              response_data={}
+              paginator = ssmclient.get_paginator('describe_parameters')
+              response_iterator = paginator.paginate()
+              for page in response_iterator:
+                  params=page['Parameters']
+                  for param in params:
+                      param_name = param['Name']
+                      if param_name.startswith('/workspaces/descriptions/'):
+                          group_name=param_name.split('/')[3]
+                          conn = Connection(conn_dc, ad_user, ldap_pw, auto_bind=True)
+                          ad_dn = f'cn={group_name},cn=Users,dc={dom},dc={tld}'
+                          logger.info(f'Deleting group {group_name} in Active Directory')
+                          result = conn.delete(ad_dn)
+                          if result==True:
+                              response_data[group_name]='DELETED'
+                          elif result!=True:
+                              response_data[group_name]='NOT_DELETED'
+                      else: 
+                          response_data['WORKSPACES_AD_GROUPS']='NONE_FOUND'
+              return response_data
+
+          def get_ad_group_members(conn_dc,dom,tld,group):
+              ad_group_members = []
+              secret_name='AdConnectorCreds' #nosec # no credentials hardcoded - credentials stored and retreived from Secrets Manager
+              smclient=boto3.client('secretsmanager')
+              smresponse = smclient.get_secret_value(
+                  SecretId=secret_name
+              )
+              creds = smresponse['SecretString']
+              creds=json.loads(creds)
+              ldap_user = creds['username']
+              ad_user = f'{dom}\\{ldap_user}'
+              ldap_pw = creds['password']
+              conn = Connection(conn_dc, ad_user, ldap_pw, auto_bind=True)
+              srch_fltr = f'(&(objectClass=user)(memberOf=CN={group},CN=Users,DC={dom},dc={tld}))'.format(group)
+              attribs = ['sAMAccountName']
+              conn.search(
+                  search_base=f'DC={dom},dc={tld}',
+                  search_filter=srch_fltr,
+                  search_scope='SUBTREE',
+                  attributes=attribs
+              ) 
+              for entry in conn.entries:
+                  username = str(entry.sAMAccountName)
+                  username = (username.lower())
+                  ad_group_members.append(username)
+              return ad_group_members
+
+          def get_group_list_for_update():
+              """This function retrieves a list of groups from Parameter Store that are to be updated"""
+              ssmclient=boto3.client('ssm')
+              logger.info("Getting list of group names from Parameter Store")
+              ad_grps=[]
+              paginator = ssmclient.get_paginator('describe_parameters')
+              response_iterator = paginator.paginate()
+              for page in response_iterator:
+                  params=page['Parameters']
+                  for param in params:
+                      if param['Name'].startswith('/workspaces/bundle-ids/'):
+                          grp_name=param['Name'].split('/')[3]
+                          logger.info(f'Found Parameter {grp_name}')
+                          ad_grps.append(grp_name)
+              logger.info(f'Retrieved the following group names from Parameter Store:{ad_grps}')
+              return(ad_grps)
+
+          def delete_parameters_for_update(groups_to_delete):
+              """This function deletes the parameters for an update"""
+              ssmclient=boto3.client('ssm')
+              for group_to_delete in groups_to_delete:
+                  param_name=f'/workspaces/descriptions/{group_to_delete}'
+                  logger.info(f'Deleting parameter /workspaces/descriptions/{param_name}')
+                  delresponse=ssmclient.delete_parameter(
+                      Name=param_name
+                  )
+                  if delresponse['ResponseMetadata']['HTTPStatusCode']==204:
+                      logger.info(f'Parameter {param_name} deleted')
+                  param_name=f'/workspaces/bundle-ids/{group_to_delete}'
+                  logger.info(f'Deleting parameter /workspaces/bundle-ids/{param_name}')
+                  delresponse=ssmclient.delete_parameter(
+                      Name=param_name
+                  )
+                  if delresponse['ResponseMetadata']['HTTPStatusCode']==204:
+                      logger.info(f'Parameter {param_name} deleted')
+              response="DELETED_PARAMETERS"
+              logger.info(response)
+              return response
+
+          def delete_ad_groups_for_update(conn_dc,dom,tld,groups_to_delete):
+              """This deletes the groups from Active Directory for an update"""
+              logger.info(f' delete ad groups function received the following groups {groups_to_delete} and will send queries to  {conn_dc} for deletion')
+              smclient = boto3.client('secretsmanager')
+              secret_name='AdConnectorCreds' #nosec # no credentials hardcoded - credentials stored and retreived from Secrets Manager
+              smresponse = smclient.get_secret_value(
+                  SecretId=secret_name
+              )
+              creds = smresponse['SecretString']
+              creds=json.loads(creds)
+              ldap_user = creds['username']
+              ad_user = f'{dom}\\{ldap_user}'
+              ldap_pw = creds['password']
+              logger.info(f'Found {ldap_user}, {ad_user}, {ldap_pw}')
+              logger.info(f'Need to delete the following groups from Active Directory: {groups_to_delete}')
+              deleted=[]
+              not_deleted=[]
+              for group_to_delete in groups_to_delete:
+                  conn = Connection(conn_dc, ad_user, ldap_pw, auto_bind=True)
+                  ad_dn = f'cn={group_to_delete},cn=Users,dc={dom},dc={tld}'
+                  logger.info(f'Active Directory object {ad_dn} will be deleted')
+                  result = conn.delete(ad_dn)
+                  logger.info(result)
+                  if result==True:
+                      logger.info(f'Group {group_to_delete} DELETED')
+                      deleted.append(group_to_delete)
+                  elif result!=True:
+                      logger.info(f'Group {group_to_delete} NOT_DELETED')
+                      not_deleted.append(group_to_delete)
+              return(deleted,not_deleted)
+
+          def send_alert_to_admin(aws_acct,sns_topic,alert_type):
+              snsclient = boto3.client('sns')
+              logger.info(f'Sending alert to admin by publishing to SNS Topic {sns_topic}')
+              if alert_type=="STACK_DELETED":
+                  subj = f'WorkSpaces Automation in Account {aws_acct} was removed'
+                  msg = f'Amazon WorkSpaces automation in AWS account {aws_acct} has been removed.\nDeletion was complete without issues.'
+              if alert_type=="STACK_DELETION_INCOMPLETE":
+                  subj = f'WorkSpaces Automation in Account {aws_acct} was removed'
+                  msg = f'Amazon WorkSpaces automation in AWS account {aws_acct} has been removed.\nPlease examine the remaining WorkSpaces Active Directory groups and determine if there are still running workspaces for the users in these groups. If there are no remaining running WorkSpaces, you may deactivate the WorkSpaces directory in the AWS WorkSpaces console.'
+              snsclient.publish(
+                  TopicArn=sns_topic,
+                  Message=msg,
+                  Subject=subj
+              )
+              logger.info("SNS MESSAGE PUBLISHED TO TOPIC")
+
+#This is the role for the Workspaces Automation Lambda function.
+  WorkspacesAutomationExecutionRole:
+    # checkov:skip=CKV_AWS_111: Directory Service DescribeDirectories must use the resource "*". See https://docs.aws.amazon.com/directoryservice/latest/admin-guide/IAM_Auth_Access_Overview.html#CreatingIAMPolicies_DS 
+    # checkov:skip=CRV_AWS_111: WorkSpaces must use the resource "*". See https://docs.aws.amazon.com/workspaces/latest/adminguide/workspaces-access-control.html
+    # checkov:skip=CRV_AWS_111: Lambda Function Creation  must use the resource "*" for CreateNetworkInterface, DeleteNetworkInterface, and DescribeNetworkInterface
+    # checkov:skip=CKV_AWS_108: Systems Manager Parameters must use the resource "*" for creation. See https://docs.aws.amazon.com/systems-manager/latest/userguide/security_iam_id-based-policy-examples.html
+    # checkov:skip=CKV_AWS_116: Systems Manager DescribeParameters must use the resource "*". See https://docs.aws.amazon.com/systems-manager/latest/userguide/security_iam_id-based-policy-examples.html
+    # checkov:skip=CKV_AWS_109: Secrets Manager is contrained to GetSecretValue for only the applicable secret - secret specified as a stack import value. 
+    Metadata:
+      cdk_nag:
+        rules_to_suppress:
+          - id: AwsSolutions-IAM5
+            reason: "Directory Service resources must use the resource *"
+          - id: AwsSolutions-IAM5
+            reason: "WorkSpaces must use the resource *"
+          - id: AwsSolutions-L1
+            reason: "Lambda Layer Not compatible with Python 3.12"
+      cfn_nag: 
+        rules_to_suppress: 
+          - id: W11
+            reason: "Directory Service resources must use the resource *"
+          - id: W11
+            reason: "WorkSpaces Service resources must use the resource * See https://docs.aws.amazon.com/workspaces/latest/adminguide/workspaces-access-control.html"
+          - id: W11
+            reason: "PutParameter resources must use the resource * See https://docs.aws.amazon.com/workspaces/latest/adminguide/workspaces-access-control.html"
+          - id: W28
+            reason: "Resource will not be replaced in an update" 
+          - id: W76
+            reason: "The complexity of the role is based on the security parameters needed for the role"
+          - id: W92
+            reason: "Lambda function runs on a cron schedule of every 5 minutes and concurrency reservations do not apply"
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub Workspaces-Automation-FunctionRole-${AWS::Region}
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: "/"
+      Policies:
+        - PolicyName: Workspaces-Automation-Lambda-Policy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !GetAtt WorkspacesStarterKitLogGroup.Arn
+              - Effect: Allow
+                Action:
+                  - workspaces:CreateWorkspaces
+                  - workspaces:DescribeWorkspaces
+                  - workspaces:MigrateWorkspace
+                  - workspaces:TerminateWorkspaces
+                  - workspaces:CreateTags
+                  - ds:DescribeDirectories
+                  - ec2:CreateNetworkInterface
+                  - ec2:DescribeNetworkInterfaces
+                  - ec2:DeleteNetworkInterface
+                Resource: "*"
+              - Effect: Allow
+                Action: 
+                  - iam:GetRole
+                Resource: !Sub "arn:aws:iam::${AWS::AccountId}:role/workspaces_DefaultRole"
+              - Effect: Allow
+                Action: 
+                  - ds:DescribeDirectories
+                Resource: "*"
+              - Effect: Allow
+                Action: 
+                  - kms:Decrypt
+                  - kms:CreateGrant
+                  - kms:RetireGrant
+                  - kms:RevokeGrant
+                  - kms:DescribeKey
+                  - kms:GenerateDataKey
+                Resource: !ImportValue "Windows-Domain-KMS-Key-Arn"
+              - Effect: Allow
+                Action: 
+                  - ssm:GetParameter
+                  - ssm:GetParametersByPath
+                Resource: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/workspaces/*"
+              - Effect: Allow
+                Action: 
+                  - ssm:DescribeParameters
+                Resource: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:*"
+              - Effect: Allow
+                Action: 
+                  - secretsmanager:GetSecretValue
+                Resource: !ImportValue "AD-Connector-Secret-ARN"
+              - Effect: Allow
+                Action: 
+                  - sns:Publish
+                Resource: !ImportValue "Windows-Domain-SNS-Topic"
+              - Effect: Allow
+                Action:
+                  - iam:PassRole
+                Resource: !Sub "arn:aws:iam::${AWS::AccountId}:role/workspaces_DefaultRole"  
+                Condition:
+                  StringEquals:
+                    iam:PassedToService: workspaces.amazonaws.com
+      Tags: 
+        - Key: AWS-Starter-Kit-Name
+          Value: Windows-Workspaces-Add-On
+# This is the workspaces automation lambda function. It runs every 5 minutes by default. It looks at the Active Directory
+# Workspaces groups, and will create a workspace for each user that is in an Active Directory Workspaces group (Groups in AD
+# that begin with "Workspaces-".) If the user is moved from one group to another, the workspace is migrated, and if the user 
+# is removed from the group, the workspace is either stopped or deleted based on the configured retention behavior.
+  WorkspacesAutomationLambdaFunction:
+    # checkov:skip=CKV_AWS_115: This Lambda function runs on a CRON EventBridge schedule and does not require concurrency. 
+    # checkov:skip=CKV_AWS_116:This Lambda function runs on a CRON EventBridge schedule with extensive logging and error handling capabilities and does not require function retries. No DLQ Reuqired
+    Metadata:
+      cdk_nag:
+        rules_to_suppress:
+          - id: AwsSolutions-L1
+            reason: "Python 3.12 not stable with Python-LDAP3, 3.11 is latest stable version"
+      cfn_nag:
+        rules_to_suppress:
+          - id: W58
+            reason: "Lambda Function has permission to write to CloudWatchLogs, see LoggingConfig property lines 1627-1631"
+          - id: W92
+            reason: "This is a Lambda-backed CloudFormation Custom Resource, runs on a CRON schedule and requires no concurrency" 
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: This Lambda function runs the automation for Workspaces. 
+      FunctionName: workspaces-automation
+      Runtime: python3.11
+      Timeout: 840
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref WorkspacesLambdaSecurityGroup
+        SubnetIds:
+          - Fn::ImportValue: "Windows-Domain-DC-Subnet1-ID"
+          - Fn::ImportValue: "Windows-Domain-DC-Subnet2-ID"
+      Layers: 
+        - !Ref CreateLambdaLayer
+      Environment: 
+        Variables: 
+          adOuForWorkspaces: !Ref WorkspacesOU
+          terminationBehavior: !Ref WorkspacesTerminationBehavior
+          accountId: !Ref AWS::AccountId
+          workspacesCode: !Ref WorkspacesActivation
+          region: !Ref AWS::Region 
+          vpcId: 
+            Fn::ImportValue: "Windows-Domain-VPC-ID"
+          dc1Ip: 
+            Fn::ImportValue: "Windows-Domain-DC1-IP"
+          dc2Ip: 
+            Fn::ImportValue: "Windows-Domain-DC2-IP"
+          snsTopic:
+            Fn::ImportValue: "Windows-Domain-SNS-Topic"
+          domainName:
+            Fn::ImportValue: "Windows-Domain-Name"
+          kmsKey: 
+            Fn::ImportValue: "Windows-Domain-KMS-Key-Arn"
+          dirId: 
+            Fn::ImportValue: "Directory-Connector-ID"
+      KmsKeyArn: !ImportValue  "Windows-Domain-KMS-Key-Arn"
+      LoggingConfig: 
+        ApplicationLogLevel: INFO
+        LogFormat: JSON 
+        LogGroup: !Ref WorkspacesStarterKitLogGroup
+        SystemLogLevel: INFO
+      MemorySize: 256
+      Role: !GetAtt WorkspacesAutomationExecutionRole.Arn
+      Handler: index.lambda_handler
+      Tags: 
+        - Key: AWS-Starter-Kit-Name
+          Value: Windows-Workspaces-Add-On
+      Code: 
+        ZipFile: |
+          import boto3
+          import os
+          import time
+          import json
+          from ldap3 import Server, Connection, ALL
+          import logging
+          logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+          logger = logging.getLogger(__name__)
+
+          def lambda_handler(event, context):
+              try: 
+                  vpc_id = os.environ.get('vpcId')
+                  dc1_ip = os.environ.get('dc1Ip')
+                  dc2_ip = os.environ.get('dc2Ip')
+                  sns_topic = os.environ.get('snsTopic')
+                  win_dom = os.environ.get('domainName')
+                  wksp_reg_code = os.environ.get('workspacesCode')
+                  ad_ou=os.environ.get('adOuForWorkspaces')
+                  if ad_ou=="":
+                      ad_ou="NOT_SPECIFIED"
+                  dom_nm = win_dom.split('.',1)
+                  dom = dom_nm[0]
+                  tld = dom_nm[1]
+                  kms_key = os.environ.get('kmsKey')
+                  dir_id = os.environ.get('dirId')
+                  term_bhvr = os.environ.get('terminationBehavior')
+                  aws_acct = os.environ.get('accountId')
+                  config_send_confirmation_emails=os.environ.get('sendConfirmationEmails')
+                  ldap_status=''
+                  logger.info('Running on schedule')
+                  """Test LDAP Connection"""
+                  conn_dc, ldap_status = test_ldap(dc1_ip,dc2_ip,dom)
+                  """Get a list of AD groups from Systems Manager Parameter Store"""
+                  param_store_group_list = get_ps_group_list()
+                  prod_groups=param_store_group_list
+                  """For each group, run a process which 
+                      1) retrieves the AD users that are members of that group via the LDAP connection putting them in an ad_group_members list
+                      2) sort the list alphabetically
+                      3) Retrieves the current users of the workspace bundle and puts them in a ws_bdl_users list
+                      4) sorts the ws_bdl_user list
+                      5) Compares the length of the 2 lists
+                      6) if the ad_group_members list is longer, create workspaces for each user not in the ws_bdl_users
+                      7) If the ad_group_members list is shorter, check for migrations, then if no migrations, delete or stop the workspace associated
+                         to the user depending on the retention policy set by the admin"""
+                  for group in prod_groups: 
+                      logger.info(f'Starting process for {group}')
+                      logger.info(f'Retrieving and sorting members of AD group {group} from Active Directory')
+                      ad_group_members = get_ad_group_members(conn_dc,dom,tld,group)
+                      ad_group_members = sorted(ad_group_members)
+                      logger.info(f'AD Group members of {group} are {ad_group_members}')
+                      logger.info(f'Retrieving Bundle ID for {group} from Parameter Store')
+                      bdl_id = get_bundle_id(group)
+                      logger.info(f'The Bundle ID associated with AD Group {group} is {bdl_id}')
+                      logger.info(f'Retrieving and sorting users of Workspaces Bundle {bdl_id}')
+                      ws_bdl_users = get_ws_users_by_bundle(bdl_id)
+                      ws_bdl_users = sorted(ws_bdl_users)
+                      logger.info(f'Found users of Bundle {bdl_id} : {ws_bdl_users}')
+                      for ad_group_member in ad_group_members:
+                          if ad_group_member not in ws_bdl_users:
+                              time.sleep(2)
+                              logger.info(f'Creating Workspace for {ad_group_member} in {group}')
+                              if "imagecreation" in ad_group_member: 
+                                  running_mode="AUTO_STOP"
+                                  vol_encryption="NONE"
+                              if "imagecreation" not in ad_group_member:
+                                  if 'HOURLY' in group:
+                                      running_mode="AUTO_STOP"
+                                      vol_encryption="ON"
+                                  if 'MONTHLY' in group:
+                                      running_mode="ALWAYS_ON"
+                                      vol_ecryption="ON"
+                              ws_status = create_workspace(ad_group_member,running_mode,bdl_id,kms_key,dir_id,vol_encryption)
+                              logger.info(f'Workspace status is {ws_status}')
+                              if ws_status=="WORKSPACE_NOT_CREATED_ALREADY_EXISTS":
+                                  continue
+                              if ws_status=="WORKSPACE_CREATED":
+                                  alert_type="CREATION_SUCCESSFUL"
+                                  alert_username=ad_group_member
+                                  send_alert_to_admin(aws_acct,sns_topic,alert_username,win_dom,alert_type,wksp_reg_code)
+                      for user in ws_bdl_users:
+                          logger.info(f'Checking bundle user {user} membership in AD Group {group}')
+                          if user not in ad_group_members:
+                              migrate_response, group_to_migrate = check_for_migration(conn_dc,dom,tld,user,prod_groups)
+                              if migrate_response=="USER_FOUND":
+                                  logger.info(f'Migrating {user} To {group_to_migrate}')
+                                  migrate_to_bdl=get_bundle_id(group_to_migrate)
+                                  logger.info(f'User will be migrated from bundle {bdl_id} to bundle {migrate_to_bdl}')
+                                  migrating_ws_id=get_workspace_id(user,dir_id)
+                                  migration_result=migrate_workspace(migrating_ws_id,migrate_to_bdl)
+                                  logger.info(f'Migration result: {migration_result}')
+                                  if migration_result=="WORKSPACE_MIGRATED":
+                                      alert_type="MIGRATION_SUCCESSFUL"
+                                  if migration_result=="WORKSPACE_NOT_MIGRATED":
+                                      alert_type="MIGRATION_FAILED"
+                                  if migration_result=="WORKSPACE_NOT_MIGRATED_UNKNOWN_ERROR":
+                                      alert_type="MIGRATION_FAILED_UNKNOWN_ERROR"
+                                  alert_username=user
+                                  email_username=user
+                                  send_alert_to_admin(aws_acct,sns_topic,alert_username,win_dom,alert_type,wksp_reg_code)
+                              if migrate_response=="USER_NOT_FOUND":
+                                  if term_bhvr=="DELETE":
+                                      logger.info(f'Termination behavior set by admin is {term_bhvr} so workspace will be deleted.')
+                                      workspace_to_delete=get_workspace_id(user,dir_id)
+                                      ws_del_status=delete_workspace(workspace_to_delete)
+                                      logger.info(f'Workspace deletion status is {ws_del_status}')
+                                      alert_username=user
+                                      email_username=user
+                                      alert_type="WORKSPACE_DELETED"
+                                      send_alert_to_admin(aws_acct,sns_topic,alert_username,win_dom,alert_type,wksp_reg_code)
+                                  if term_bhvr=="RETAIN":
+                                      logger.info(f'Termination behavior set by admin is {term_bhvr} so workspace will be stopped and not deleted.')
+                                      workspace_to_stop=get_workspace_id(user,dir_id)
+                                      ws_stop_status=stop_workspace(user,workspace_to_stop)
+                                      logger.info(f'Workspace deletion status is {ws_stop_status}') 
+                                      alert_username=user
+                                      email_username=user
+                                      alert_type="WORKSPACE_STOPPED"
+                                      send_alert_to_admin(aws_acct,sns_topic,alert_username,win_dom,alert_type,wksp_reg_code)
+                                
+              except Exception as e:
+                  raise e 
+
+          def test_ldap(dc1_ip,dc2_ip,dom):
+              dclist = [dc1_ip,dc2_ip]
+              smclient = boto3.client('secretsmanager')
+              secret_name='AdConnectorCreds' #nosec # no credentials hardcoded - credentials stored and retreived from Secrets Manager
+              smresponse = smclient.get_secret_value(
+                  SecretId=secret_name
+              )
+              creds = smresponse['SecretString']
+              creds=json.loads(creds)
+              ldap_user = creds['username']
+              ad_user = f'{dom}\\{ldap_user}'
+              ldap_pw = creds['password']
+              logger.info('Testing LDAP to MS AD...')
+              for dc in dclist:
+                  logger.info('Connecting to '+dc)
+                  conn = Connection(dc, ad_user, ldap_pw, auto_bind=True)
+                  if conn.bind():
+                      ldap_status = 'REACHABLE'
+                      return dc, ldap_status
+                      logger.info(f'Active Directory is {ldap_status} to {dc}')
+                      break
+                  else: 
+                      ldap = 'NOT_REACHABLE'
+                      dc = 'NONE'
+                      logger.info(f'Active Directory is {ldap_status}')
+                      return dc,ldap_status
+
+          def get_ps_group_list():
+              wsclient=boto3.client('workspaces')
+              ssmclient=boto3.client('ssm')
+              logger.info("Getting list of group names from Parameter Store")
+              ad_groups=[]
+              paginator = ssmclient.get_paginator('describe_parameters')
+              response_iterator = paginator.paginate()
+              for page in response_iterator:
+                  params=page['Parameters']
+                  for param in params:
+                      if param['Name'].startswith('/workspaces/bundle-ids/'):
+                          param_name=param['Name'].split('/')[3]
+                          group_name=param_name
+                          ad_groups.append(group_name)
+              logger.info(f'Retrieved the following group names from Parameter Store: {ad_groups}')
+              return ad_groups
+
+          def get_image_creation_group_list():
+              wsclient=boto3.client('workspaces')
+              ssmclient=boto3.client('ssm')
+              logger.info("Getting list of group names from Parameter Store for Image-Creation groups only")
+              ad_image_creation_groups=[]
+              paginator = ssmclient.get_paginator('describe_parameters')
+              response_iterator = paginator.paginate()
+              for page in response_iterator:
+                  params=page['Parameters']
+                  for param in params:
+                      if param['Name'].startswith('/workspaces/bundle-ids/') and "Image-Creation" in param['Name']:
+                          param_name=param['Name'].split('/')[3]
+                          group_name=param_name
+                          ad_image_creation_groups.append(group_name)
+              logger.info(f'Retrieved the following machine imaging group names from Parameter Store: {ad_image_creation_groups}')
+              return ad_image_creation_groups
+    
+          def get_bundle_id(group):
+              ssmclient = boto3.client('ssm')
+              response = ssmclient.get_parameter(
+                  Name=f'/workspaces/bundle-ids/{group}',
+                  WithDecryption=True
+              )
+              bdl_id = response['Parameter']['Value']
+              return bdl_id
+  
+          def get_computer_name(wksp_id):
+              wsclient=boto3.client('workspaces')
+              logger.info(f'getting computer name from workspace ID {wksp_id}')
+              response=wsclient.describe_workspaces(
+                  WorkspaceIds=[
+                    wksp_id
+                  ]
+              )
+              computer_name=response['Workspaces'][0]['ComputerName']
+              logger.info(f'Computer Name to delete is {computer_name}')
+              return computer_name
+
+          def get_ad_group_members(conn_dc,dom,tld,group):
+              ad_group_members = []
+              secret_name='AdConnectorCreds' #nosec # no credentials hardcoded - credentials stored and retreived from Secrets Manager
+              smclient=boto3.client('secretsmanager')
+              smresponse = smclient.get_secret_value(
+                  SecretId=secret_name
+              )
+              creds = smresponse['SecretString']
+              creds=json.loads(creds)
+              ldap_user = creds['username']
+              ad_user = f'{dom}\\{ldap_user}'
+              ldap_pw = creds['password']
+              conn = Connection(conn_dc, ad_user, ldap_pw, auto_bind=True)
+              srch_fltr = f'(&(objectClass=user)(memberOf=CN={group},CN=Users,DC={dom},dc={tld}))'.format(group)
+              attribs = ['sAMAccountName']
+              conn.search(
+                  search_base=f'DC={dom},dc={tld}',
+                  search_filter=srch_fltr,
+                  search_scope='SUBTREE',
+                  attributes=attribs
+              ) 
+              for entry in conn.entries:
+                  username = str(entry.sAMAccountName)
+                  username = (username.lower())
+                  ad_group_members.append(username)
+              return ad_group_members
+
+          def get_ws_users_by_bundle(bdl_id):
+              wsclient = boto3.client('workspaces')
+              wsb_users=[]
+              paginator = wsclient.get_paginator('describe_workspaces')
+              response_iterator = paginator.paginate(
+                  BundleId=bdl_id
+              )
+              for page in response_iterator:
+                  workspaces=(page['Workspaces'])
+                  for workspace in workspaces:
+                      bdl_user=workspace['UserName']
+                      bdl_user=(bdl_user.lower())
+                      wsb_users.append(bdl_user)
+              return wsb_users
+
+          def create_workspace(member,running_mode,bdl_id,kms_key,dir_id,vol_encryption):
+              wsclient = boto3.client('workspaces')
+              if vol_encryption=="NONE":
+                  wsresponse = wsclient.create_workspaces(
+                      Workspaces = [
+                          {
+                              'DirectoryId': dir_id,
+                              'BundleId': bdl_id,
+                              'UserName': member,
+                              'WorkspaceProperties':
+                                  {
+                                      'RunningMode': running_mode
+                                  },
+                              'Tags':
+                                  [
+                                      {
+                                          'Key': 'AWS-Starter-Kit-Name',
+                                          'Value': 'Windows-Workspaces-Add-On'
+                                      },
+                                      {
+                                          'Key': 'Creator',
+                                          'Value': 'workspace-automation'
+                                      },
+                                  ],
+                          }
+                      ]
+                  )
+                  if len(wsresponse['PendingRequests'])>0:
+                      response = 'WORKSPACE_CREATED'
+                  elif len(wsresponse['FailedRequests'])>0:
+                      if wsresponse['FailedRequests'][0]['ErrorCode'] == 'ResourceExists.WorkSpace':
+                          response = 'WORKSPACE_NOT_CREATED_ALREADY_EXISTS'
+                  return response
+              if vol_encryption=="ON": 
+                  wsresponse = wsclient.create_workspaces(
+                      Workspaces = [
+                          {
+                              'DirectoryId': dir_id,
+                              'BundleId': bdl_id,
+                              'UserName': member,
+                              'VolumeEncryptionKey': kms_key,
+                              'UserVolumeEncryptionEnabled': True,
+                              'RootVolumeEncryptionEnabled': True,
+                              'WorkspaceProperties': 
+                                  {
+                                      'RunningMode': running_mode
+                                  },
+                              'Tags':
+                                  [
+                                      {
+                                          'Key': 'AWS-Starter-Kit-Name',
+                                          'Value': 'Windows-Workspaces-Add-On'
+                                      },
+                                      {
+                                          'Key': 'Creator',
+                                          'Value': 'workspace-automation'
+                                      },
+                                  ],
+                          },
+                      ]
+                  )
+                  if len(wsresponse['PendingRequests'])>0:
+                      response = 'WORKSPACE_CREATED'
+                  elif len(wsresponse['FailedRequests'])>0:
+                      if wsresponse['FailedRequests'][0]['ErrorCode'] == 'ResourceExists.WorkSpace':
+                          response = 'WORKSPACE_NOT_CREATED_ALREADY_EXISTS'
+                  return response
+
+          def check_for_migration(conn_dc,dom,tld,user,prod_groups):
+              logger.info(f'Checking {user} for a migration')
+              migrate_status=""
+              for group in prod_groups: 
+                  logger.info(f'migration check for {user} in {group}')
+                  ad_group_members = get_ad_group_members(conn_dc,dom,tld,group)
+                  if len(ad_group_members)>0:
+                      logger.info(f'Found group members {ad_group_members} in group {group}')
+                      for member in ad_group_members: 
+                          if member==user:
+                              logger.info(f'User found for migration')
+                              migrate_status="USER_FOUND"
+                              to_group=group
+                              logger.info(f'Response from function is {migrate_status} and {to_group}')
+                              return migrate_status,to_group
+              if migrate_status=="":
+                  migrate_status="USER_NOT_FOUND"
+                  to_group="NO_GROUP_TO_MIGRATE_TO"
+                  logger.info(f'Response from function is {migrate_status} and {to_group}')
+                  return migrate_status,to_group
+
+          def get_workspace_id(user,dir_id):
+              wsclient = boto3.client('workspaces')
+              logger.info("Getting Workspace ID")
+              wsresponse = wsclient.describe_workspaces(
+                  DirectoryId=dir_id,
+                  UserName = user
+              )
+              ws_id = wsresponse['Workspaces'][0]['WorkspaceId']
+              logger.info(f'Workspace ID is {ws_id}')
+              return ws_id
+
+          def migrate_workspace(ws_id,migrate_to_bdl):
+              try: 
+                  wsclient = boto3.client('workspaces')
+                  wsresponse = wsclient.migrate_workspace(
+                      SourceWorkspaceId=ws_id,
+                      BundleId=migrate_to_bdl
+                  )
+                  status=wsresponse['ResponseMetadata']['HTTPStatusCode']
+                  if status==200:
+                      migration_status = "WORKSPACE_MIGRATED"
+                      return migration_status
+                  if status!=200:
+                      migration_status="WORKSPACE_NOT_MIGRATED"
+                      return migration_status
+              except Exception as e:
+                  migration_status = "WORKSPACE_NOT_MIGRATED_UNKNOWN_ERROR"
+                  migration_status
+      
+          def send_alert_to_admin(aws_acct,sns_topic,alert_username,win_dom,alert_type,wksp_reg_code):
+              snsclient = boto3.client('sns')
+              logger.info(f'Sending alert to admin by publishing to SNS Topic {sns_topic}')
+              if alert_type=="CREATION_SUCCESSFUL":
+                  subj = f'Amazon WorkSpace Created in Account {aws_acct}'
+                  msg = f'A Workspace has been created for a user in AWS Account {aws_acct}.\nWindows Domain: {win_dom}\nAD Logon Name: {alert_username}\nWorkspaces Registration Code: {wksp_reg_code}\nWorkspaces Client can be downloaded here: https://clients.amazonworkspaces.com/\nSee CloudWatch Log Group Workspace-Automation-Log-Group for details'
+              if alert_type=="CREATION_FAILED":
+                  subj = f'Amazon WorkSpace FAILED creation in Account {aws_acct}'
+                  msg = f'A Workspace has failed creation for a user in AWS Account {aws_acct}.\nWindows Domain: {win_dom}\nAD Logon Name: {alert_username}\nSee CloudWatch Log Group Workspace-Automation-Log-Group for details'
+              if alert_type=="MIGRATION_SUCCESSFUL":
+                  subj = f'Amazon WorkSpace was migrated in Account {aws_acct}'
+                  msg = f'A Workspace was migrated for a user in AWS Account {aws_acct}.\nWindows Domain: {win_dom}\nAD Logon Name: {alert_username}\nWorkspaces Registration Code: {wksp_reg_code}\nSee CloudWatch Log Group Workspace-Automation-Log-Group for details'
+              if alert_type=="MIGRATION_FAILED":
+                  subj = f'Amazon WorkSpace FAILED migration in Account {aws_acct}'
+                  msg = f'A Workspace has failed migration for a user in AWS Account {aws_acct}.\nWindows Domain: {win_dom}\nAD Logon Name: {alert_username}\nSee CloudWatch Log Group Workspace-Automation-Log-Group for details'
+              if alert_type=="MIGRATION_FAILED_UNKNOWN_ERROR":
+                  subj = f'Amazon WorkSpace FAILED migration in Account {aws_acct}'
+                  msg = f'A Workspace has failed migration for a user in AWS Account {aws_acct}.\nWindows Domain: {win_dom}\nAD Logon Name: {alert_username}\nSee CloudWatch Log Group Workspace-Automation-Log-Group for details'
+              if alert_type=="WORKSPACE_DELETED":
+                  subj = f'Amazon WorkSpace was DELETED in Account {aws_acct}'
+                  msg = f'A Workspace was DELETED for a user in AWS Account {aws_acct}.\nWindows Domain: {win_dom}\nAD Logon Name: {alert_username}\nSee CloudWatch Log Group Workspace-Automation-Log-Group for details'
+              if alert_type=="WORKSPACE_STOPPED":
+                  subj = f'Amazon WorkSpace was STOPPED FOR RETENTION in Account {aws_acct}'
+                  msg = f'A Workspace was STOPPED for a user in AWS Account {aws_acct}.\nWindows Domain: {win_dom}\nAD Logon Name: {alert_username}\nYour WorkSpaces Automation retention settings require stopping Workspaces.\nSee CloudWatch Log Group Workspace-Automation-Log-Group for details'
+              snsclient.publish(
+                  TopicArn=sns_topic,
+                  Message=msg,
+                  Subject=subj
+             )
+              logger.info("SNS MESSAGE PUBLISHED TO TOPIC")
+
+          def stop_workspace(user,wksp_id):
+              try: 
+                  wsclient = boto3.client('workspaces')
+                  logger.info(f'Stopping Workspace for {user} of workspace {wksp_id}')
+                  wsclient.modify_workspace_properties(
+                      WorkspaceId = wksp_id,
+                      WorkspaceProperties={
+                          'RunningMode': 'AUTO_STOP'
+                      }
+                  )
+                  wsresponse = wsclient.describe_workspaces(
+                      WorkspaceIds=[
+                          {
+                             'WorkspaceId': wksp_id
+                          }
+                      ]
+                  )
+                  ws_state = wsresponse['Workspaces'][0]['State']
+                  valid_stopped_states = ['STOPPED',"STOPPING"]
+                  valid_running_state = 'AVAILABLE'
+                  for state in valid_stopped_states:
+                      if state == ws_state:
+                          status = 'IN STOPPED STATE'
+                          logger.info(f'Workspace status is {status}')
+                          return status
+                          break
+                      elif ws_state == 'valid_running_state':
+                          client.stop_workspaces(
+                              StopWorkspaceRequests=[
+                                  {
+                                      'WorkspaceId': wksp_id
+                                  }
+                              ]
+                          )
+                          status = 'STOPPED'
+                          logger.info(f'Workspace status is {status}')
+                          return status
+
+              except Exception as e:
+                  status="ERROR_INVALID_STATE"
+                  return status
+    
+          def delete_workspace(wksp_id):
+              try: 
+                  logger.info(f'Deleting workspace {wksp_id}')
+                  wsclient=boto3.client('workspaces')
+                  response = wsclient.terminate_workspaces(
+                      TerminateWorkspaceRequests=[
+                          {
+                              'WorkspaceId': wksp_id
+                          }
+                      ]
+                  )
+                  if len(response['FailedRequests'])>0:
+                      status="NOT_DELETED_WORKSPACE_IN_SUSPENDED_STATE"
+                  return status
+
+              except Exception as e:
+                  status="UNKNOWN ERROR-BUT NOT A DEALBREAKER"
+                  return status
+    
+          def delete_computer_in_ad(conn_dc,dom,tld,computer_name,ad_ou):
+              ssmclient = boto3.client('ssm')
+              smclient = boto3.client('secretsmanager')
+              secret_name='AdConnectorCreds' #nosec # no credentials hardcoded - credentials stored and retreived from Secrets Manager
+              smresponse = smclient.get_secret_value(
+                  SecretId=secret_name
+              )
+              creds = smresponse['SecretString']
+              creds=json.loads(creds)
+              ldap_user = creds['username']
+              ad_user = f'{dom}\\{ldap_user}'
+              ad_ou=ad_ou.lower()
+              ldap_pw = creds['password']
+              if ad_ou=="NOT_SPECIFIED":
+                  logger.info(f'AD OU was not specified at Stack creation so we will look for computer name {computer_name} in the Users container')
+                  conn = Connection(conn_dc, ad_user, ldap_pw, auto_bind=True)
+                  ad_dn = f'cn={computer_name},cn=Computers,dc={dom},dc={tld}'
+                  logger.info(f'Deleting computer {computer_name} from the Users container in Active Directory')
+                  result = conn.delete(ad_dn)
+                  if result==True:
+                      logger.info(f'Deleted {computer_name} from the users container in Active Directory')
+                  elif result!=True:
+                      logger.info(f'Delete failed for {computer_name}, check the OU and verify if {computer_name} still exists')
+                  else: 
+                      logger.info(f'Delete failed for {computer_name} because it probably was not found in Active Directory. Check the OU and see if this is the expected behavior')
+              if ad_ou!="NOT_SPECIFIED":
+                  conn = Connection(conn_dc, ad_user, ldap_pw, auto_bind=True)
+                  ad_dn = f'cn={computer_name},ou={ad_ou},dc={dom},dc={tld}'
+                  logger.info(f'Deleting computer {computer_name} from OU {ad_ou} in Active Directory')
+                  result = conn.delete(ad_dn)
+                  logger.info(result)
+                  if result==True:
+                      logger.info(f'{computer_name} deleted from Active Directory OU {ad_ou}')
+                  elif result!=True:
+                      logger.info(f'{computer_name} NOT deleted from Active Directory OU {ad_ou}')
+                  else: 
+                      logger.info(f'No WorkSpaces computers found in Active Directory OU {ad_ou}')
+
+# The next two resources are the EventBridge rule and the permission to invoke it. 
+  ScheduledRuleForWorkspacesAutomation: 
+    Type: AWS::Events::Rule
+    Properties: 
+      Description: This runs the WorkSpaces automation lambda function every 5 minutes
+      ScheduleExpression: rate(5 minutes) #CAN BE SET TO RUN AUTOMATION AT A FASTER OR SLOWER INTERVAL. DEFAULT IS 5 MINUTES. BEWARE OF THE PHYSICS OF THIS SETTING; THERE ARE ONLY SO MANY WORKSPACES THAT CAN BE CREATED IN X MINUTES, BASED ON A 2 SECOND INTERVAL BETWEEN API CALLS.
+      State: ENABLED
+      Targets: 
+        - 
+          Arn: !GetAtt WorkspacesAutomationLambdaFunction.Arn
+          Id: TargetFunction1
+  PermissionForEventsToInvokeWorkspacesAutomation: 
+    Type: AWS::Lambda::Permission
+    Properties: 
+      FunctionName: !Ref WorkspacesAutomationLambdaFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt ScheduledRuleForWorkspacesAutomation.Arn 
+# This is the role for the Paramter updater Lambda function.
+  WorkspacesParameterUpdaterExecutionRole:
+    # checkov:skip=CKV_AWS_108:Systems Manager Parameters must use the resource "*" for creation. See https://docs.aws.amazon.com/systems-manager/latest/userguide/security_iam_id-based-policy-examples.html
+    # checkov:skip=CKV_AWS_111:Systems Manager DescribeParameters must use the resource "*". See https://docs.aws.amazon.com/systems-manager/latest/userguide/security_iam_id-based-policy-examples.html
+    Metadata:
+      cdk_nag:
+        rules_to_suppress:
+          - id: AwsSolutions-IAM5
+            reason: "Systems Manager Parameters must use the resource * for creation. See https://docs.aws.amazon.com/systems-manager/latest/userguide/security_iam_id-based-policy-examples.html"
+      cfn_nag:
+        rules_to_suppress:
+          - id: W11
+            reason: "PutParameter resources must use the resource *. See https://docs.aws.amazon.com/systems-manager/latest/userguide/security_iam_id-based-policy-examples.html"
+          - id: W28
+            reason: "Resource will not be replaced in an update" 
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: Workspaces-ParameterUpdater-FunctionRole
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: "/"
+      Policies:
+        - PolicyName: Workspaces-Parameter-Updater-Lambda-Policy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !GetAtt WorkspacesStarterKitLogGroup.Arn
+              - Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:Encrypt
+                  - kms:GenerateDataKey
+                  - kms:DescribeKey
+                Resource: 
+                  - !ImportValue "Windows-Domain-KMS-Key-Arn"
+              - Effect: Allow
+                Action:
+                  - workspaces:DescribeWorkspaceBundles
+                  - ssm:GetParametersByPath
+                  - ssm:PutParameter
+                  - ssm:GetParameter
+                Resource: "*"   
+      Tags: 
+        - Key: AWS-Starter-Kit-Name
+          Value: Windows-Workspaces-Add-On
+# This function runs a daily job which looks at the Bundle-ID's of each Public Workspace bundle that the user is using, and if there
+# is a newer bundle available, it updates the bundle ID to the new bundle.
+  WorkspacesParameterUpdaterLambdaFunction:
+    Type: AWS::Lambda::Function
+    # checkov:skip=CKV_AWS_115:This Lambda function runs on a CRON EventBridge Schedule and has no need for concurrency
+    # checkov:skip=CKV_AWS_116:This Lambda function runs on a CRON EventBridge schedule with extensive logging and error handling capabilities and does not require function retries. Does not need a Dead Letter Queue
+    # checkov:skip=CKV_AWS_117:This is a Lambda-backed CloudFormation Custom Resource and only executes once and only requires access to AWS API
+    Metadata:
+      cdk_nag:
+        rules_to_suppress:
+          - id: AwsSolutions-L1
+            reason: "Python 3.12 not stable with Python-LDAP3, 3.11 is latest stable version"
+      cfn_nag:
+        rules_to_suppress:
+          - id: W58
+            reason: "Lambda Function has permission to write to CloudWatch Logs to the specified log group. See resource WorkspacesStarterKitLogGroup and lines 2253-2257"
+          - id: W89
+            reason: "This is a CloudFormation custom resource and it not required to run inside a VPC"
+          - id: W92
+            reason: "This is a Lambda-backed CloudFormation Custom Resource runs on a CRON schedule and requires no concurrency" 
+    Properties:
+      Description: This Lambda function runs an updater function which ensures that Workspaces are created using the latest bundles. 
+      FunctionName: !Sub workspaces-parameter-updater-${AWS::Region}
+      Runtime: python3.11
+      Timeout: 120
+      LoggingConfig: 
+        ApplicationLogLevel: INFO
+        LogFormat: JSON 
+        LogGroup: !Ref WorkspacesStarterKitLogGroup
+        SystemLogLevel: INFO
+      Role: !GetAtt WorkspacesParameterUpdaterExecutionRole.Arn
+      Handler: index.lambda_handler
+      Environment:
+        Variables:
+          kmsKey: 
+            Fn::ImportValue: "Windows-Domain-KMS-Key-Arn"
+      KmsKeyArn: !ImportValue  "Windows-Domain-KMS-Key-Arn"
+      Tags: 
+        - Key: AWS-Starter-Kit-Name
+          Value: Windows-Workspaces-Add-On
+      Code: 
+        ZipFile: |
+          import boto3
+          import logging
+          logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+          logger = logging.getLogger(__name__)
+
+          def lambda_handler(event, context):
+              """This lambda function looks for Bundle ID updates for the Amazon Public Bundles that were added to Active Directory for WorkSpaces automation"""
+              try:
+                  ssmclient=boto3.client('ssm')
+                  wsclient=boto3.client('workspaces')
+                  ssmresponse = ssmclient.get_parameters_by_path(
+                      Path='/workspaces/bundle-ids/'
+                  )
+                  for param in ssmresponse['Parameters']:
+                      param_name=param['Name'].split("/")[3]
+                      param_vals=param_name.split("-")
+                      if len(param_vals)==6: # The test between a public bundle and a custom bundle is that custom bundles have 7 elements and public bundles have 6 elements; if there are 6 elements, its a public bundle. Dont make any changes to custom bundles.
+                          param_val=param['Value']
+                          param_fullname=param['Name']
+                          cpu_type=param_name.split("-")[1]
+                          os_type=f'{param_name.split("-")[4]} {param_name.split("-")[5]}'
+                          protocol_type=param_name.split("-")[2]
+                          logger.info(f'{param_name} is for {cpu_type}, {os_type} and {protocol_type}')
+                          if "OFFICE" in param_name:
+                              include_office="yes"
+                          if "OFFICE" not in param_name:
+                              include_office="no"
+                          paginator = wsclient.get_paginator('describe_workspace_bundles')
+                          paginator_iterator = paginator.paginate(
+                              Owner='AMAZON'
+                          )
+                          for page in paginator_iterator: 
+                              bundles=(page['Bundles'])
+                              for bundle in bundles: 
+                                  if include_office=="yes":
+                                      if os_type in bundle['Name'] and protocol_type in bundle['Name'] and "Office" in bundle['Name']:
+                                          if bundle['ComputeType']['Name']==cpu_type.upper():
+                                              bundle_id=bundle['BundleId']
+                                              if param_val!=bundle_id:
+                                                  ssmresponse = ssmclient.put_parameter(
+                                                      Name=param_fullname,
+                                                      Description='This parameter is for Workspaces Automation Starter Kit',
+                                                      Value=bundle_id,
+                                                      Type='String',
+                                                      Overwrite=True
+                                                  )
+                                                  logger.info(f'Updating Parameter {param_fullname} with bundle {bundle_id}')
+                                              logger.info(f'No changes to bundle-id value for parameter {param_fullname}')
+                                  if include_office=="no":
+                                      if os_type in bundle['Name'] and protocol_type in bundle['Name'] and "Office" not in bundle['Name']:
+                                          if bundle['ComputeType']['Name']==cpu_type.upper():
+                                              bundle_id=bundle['BundleId']
+                                              if param_val!=bundle_id:
+                                                  ssmresponse = ssmclient.put_parameter(
+                                                      Name=param_fullname,
+                                                      Description='This parameter is for Workspaces Automation Starter Kit',
+                                                      Value=bundle_id,
+                                                      Type='String',
+                                                      Overwrite=True
+                                                  )
+                                                  logger.info(f'Updating Parameter {param_fullname} with bundle {bundle_id}')
+                                              logger.info(f'No changes to bundle-id value forparameter {param_fullname}')
+
+              except Exception as e:
+                  logger.error(e)
+
+# Below are the EventBridge rule and permission for the Parameter updater Lambda function.
+  ScheduledRuleForParameterUpdater: 
+    Type: AWS::Events::Rule
+    Properties: 
+      Description: This runs the WorkSpaces automation lambda function once daily 
+      ScheduleExpression: rate(1 day)
+      State: ENABLED
+      Targets: 
+        - 
+          Arn: !GetAtt WorkspacesParameterUpdaterLambdaFunction.Arn
+          Id: TargetFunction2
+  PermissionForEventsToInvokeParameterUpdater: 
+    Type: AWS::Lambda::Permission
+    Properties: 
+      FunctionName: !Ref WorkspacesParameterUpdaterLambdaFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt ScheduledRuleForParameterUpdater.Arn 
+Outputs:
+# This outputs the LDAP3 Lambda Layer ARN for future use.
+  Ldap3LambdaLayerArn:
+    Description: Python-LDAP3 Lambda Layer ARN
+    Value: !Ref CreateLambdaLayer
+    Export:
+      Name: LDAP3-Lambda-Layer
+    

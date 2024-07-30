@@ -1,0 +1,347 @@
+## Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy of this
+# software and associated documentation files (the "Software"), to deal in the Software
+# without restriction, including without limitation the rights to use, copy, modify,
+# merge, publish, distribute, sublicense, and/or sell copies of the Software, and to
+# permit persons to whom the Software is furnished to do so.
+#
+# Sample code, software libraries, command line tools, proofs of concept, templates, or other related technology are provided as 
+# AWS Content or Third-Party Content under the AWS Customer Agreement, or the relevant written agreement between you and AWS
+# (whichever applies). You are responsible for testing, securing, and optimizing the AWS Content or Third-Party Content, such as 
+# sample code, as appropriate for production grade use based on your specific quality control practices and standards. Deploying AWS 
+# Content or Third-Party Content may incur AWS charges for creating or using AWS chargeable resources, such as running Amazon EC2 
+# instances or using Amazon S3 storage.
+#
+# CloudFormation template for an AWS Well Architected Automated Windows WorkSpaces based deployment.
+#
+# This template builds a bundle and creates the necessary parameters and Active Directory groups for the automation from the WorkSpaces starter kit.
+#
+# This template is part of the WorkSpaces Starter Kit library. This template should be deployed after a WorkSpace image has been created and is in "Available" state. 
+#
+# This template exports outputs to facilitate easy additions of future services or components such as additional servers, VDI (WorkSpaces), Database, etc. 
+# It is recommended that these values are NOT changed in any way. 
+#
+# For more details, refer to the Deployment Guide and Troubleshooting Guide.
+#
+AWSTemplateFormatVersion: 2010-09-09
+Description: > 
+  SK-Windows-Migration-Utility-Workspaces-Build-Bundle
+  This template builds a Workspaces Bundle from the Golden Image from the Workspaces starter kit.
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - 
+        Label:
+          default: Basic Information
+        Parameters:
+          - BundleName
+          - BundleDescription
+          - WorkSpaceImageId
+      - 
+        Label:
+          default: Choose Compute Type and storage
+        Parameters:
+          - ComputeType
+          - CDriveStorage
+          - DDriveStorage
+          - Protocols
+          - UsageOptions
+          - OperatingSystem
+Parameters: 
+  BundleName:
+    Type: String
+    Description: >
+      The Name of your custom bundle. 16 Characters max, letters and numbers only, 16 Characters max. 
+    AllowedPattern: ^[a-zA-Z0-9]{1,16}$
+  BundleDescription: 
+    Type: String
+    Description: The description of your bundle. 
+  WorkSpaceImageID: 
+    Type: String
+    Description: >
+      The Image ID of the WorkSpace image. Can be found in the Amazon WorkSpaces console under "Images"
+  ComputeType:
+    Type: String
+    Description: >
+      This is the compute type that you will select for your bundle.
+      STANDARD WORKSPACES have 2 vCPU and 4GB of RAM. They are suitable for web browsing, instant Messaging, email, basic
+      text Editing and Data Entry. Standard WorkSpaces are not suitable for audio and video conferencing, screen sharing, word processing, 
+      software development, business intelligence applications, or graphics applications.
+      PERFORMANCE WORKSPACES  have 2 vCPU and 8GB of RAM. They share the same suitability with Standard WorkSpaces, PLUS
+      Word processing, spreadsheets, audio processing, coursewar, and audio conferencing.
+      Performance WorkSpaces are not suitable for Video conferencing, screen sharing, software development, business intelligence 
+      applications, or graphics applications.
+      POWER WORKSPACES have 4 vCPU and 16GB of RAM. They share the same suitability with Standard and Performance WorkSpaces, PLUS
+      software development, entry-to-mid-level data processing, and Audio and Video Conferencing.
+      Power WorkSpaces are not suitable for screen sharing, business intelligence applications, or graphics applications.
+      POWERPRO WORKSPACES have 8 vCPU and  32GB of RAM. They share the same suitability with Standard, Performance and Power WorkSpaces, PLUS
+      Data Warehousing, Business Intelligence Applications and Screen Sharing.
+      PowerPro WorkSpaces are not suitable for Machine Learning model training or graphics applications. 
+      GRAPHICS (Grpahics.g4dn) WorkSpaces have 4 vCPU and  16GB of RAM, with 1 vGPU. They are suitable for web browsing, email,
+      word processing, audio processing, software development (IDE), entry to mid-level data processing, business
+      intelligence applications, graphic design, and CAD/CAM (computer aided design/computer aided manufacturing).  
+      Graphics Workspaces are not suitable for video conferencing. 
+      IMPORTANT - Graphics Workspaces may be subject to service quotas. Please see https://docs.aws.amazon.com/general/latest/gr/aws_service_limits.html
+      for more information.
+      GRAPHICS PRO (Grpahics.g4dn) WorkSpaces have 16 vCPU and  64GB of RAM, with 1 vGPU. They share the same suitability as Graphics 
+      (Graphics.g4dn) WorkSpaces, PLUS Data Warehousing, video transcoding, 3D rendering/3D visualizations, pphoto-realistic design, game 
+      streaming, ML (machine learning) model training, and ML inference. 
+      Graphics Pro (GrpahicsPro.g4dn) Workspaces are not suitable for video conferencing. 
+      IMPORTANT - GraphicsPro (GrpahicsPro.g4dn) Workspaces may be subject to service quotas. Please see https://docs.aws.amazon.com/general/latest/gr/aws_service_limits.html
+      for more information.
+    AllowedValues:
+      - STANDARD
+      - PERFORMANCE
+      - POWER
+      - POWERPRO
+      - GRAPHICS_G4DN
+      - GRAPHICSPRO_G4DN
+  Storage:
+    Type: String
+    Description: >
+      The size of the C: drive in GB
+    AllowedValues:
+      - 80GB-Root-10GB-User
+      - 80GB-Root-50GB-User
+      - 80GB-Root-100GB-User
+      - 175GB-Root-100GB-User
+      - 175GB-Root-200GB-User
+      - 175GB-Root-300GB-User
+  Protocol:
+    Type: String
+    Description: >
+      Which WorkSpaces Protocol will be used for this bundle?
+    AllowedValues:
+      - PCoIP
+      - WSP
+  UsageOptions:
+    Type: String
+    Description: >
+      How will this bundle be billed?
+    AllowedValues:
+      - Hourly
+      - Monthly
+  OperatingSystem:
+    Type: String
+    Description: >
+      Which Operating System will this bundle use?
+    AllowedValues:
+      - Windows-Server-2022
+      - Windows-Server-2019
+      - Windows-Server-2016
+Resources:
+  # CreateWorkspaceBundle: 
+  #   Type: Custom::CreateWorkspaceBundle
+  #   Properties: 
+  #     ServiceToken: !GetAtt CreateWsBundleLambdaFunction.Arn 
+  CreateWsImageLambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub Workspaces-CreateBundle-${BundleName}-${AWS::Region}
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: "/"
+      Policies:
+        - PolicyName: Workspaces-CreateBundle-LambdaPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:Workspaces-Starter-Kit-Logs:*"
+              - Effect: Allow
+                Action:
+                  - workspaces:CreateWorkspaceBundle
+                  = workspaces:DescribeWorkspaceBundles
+                  - workspaces:CreateTags
+                  - ds:DescribeDirectories 
+                  - ssm:PutParameter     
+                  - ssm:DeleteParameter                 
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !ImportValue "AD-Connector-Secret-ARN"
+  CreateWsBundleLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: This Lambda function creates a WorkSpace Bundle.
+      FunctionName: !Join ["-", ["Workspaces-Create", !Ref "BundleName", "Bundle"]]
+      Runtime: python3.11
+      Timeout: 15
+      Layers:
+        - !ImportValue LDAP3-Lambda-Layer
+      Environment: 
+        Variables: 
+          ImageId: !Ref WorkSpaceImageID
+          CpuType: !Ref ComputeType
+          BundleNm: !Ref BundleName
+          BundleDesc: !Ref BundleDescription
+          WsStorage: !Ref Storage
+          WindowsDomain: 
+            Fn::ImportValue: "Windows-Domain-Name"
+          WsProtocol: !Ref Protocol
+          UsageOpt: !Ref UsageOptions
+          WsOs: !Ref OperatingSystem
+      Role: !GetAtt CreateWsImageLambdaExecutionRole.Arn
+      Handler: index.lambda_handler
+      Code: 
+        ZipFile: |
+          import boto3
+          import os
+          import time
+          import itertools
+          import cfnresponse 
+
+          def lambda_handler(event, context):
+              try: 
+                  if event["RequestType"] == "Create":
+                      response_data = {}
+                      phys_id = ''
+                      img_id = os.environ.get('ImageId')
+                      cpu_type = os.environ.get('CpuType')
+                      bdl_nm = os.environ.get('BundleNm')
+                      bdl_desc = os.environ.get('BundleDesc')
+                      storage = os.environ.get('WsStorage')
+                      if storage == '80GB-Root-10GB-User':
+                          c_drv = '80'
+                          d_drv = '10'
+                      if storage == '80GB-Root-50GB-User':
+                          c_drv = '80'
+                          d_drv = '50'
+                      if storage == '80GB-Root-100GB-User':
+                          c_drv = '80'
+                          d_drv = '100'
+                      if storage == '175GB-Root-100GB-User':
+                          c_drv = '175'
+                          d_drv = '100'
+                      if storage == '175GB-Root-200GB-User':
+                          c_drv = '175'
+                          d_drv = '200'
+                      if storage == '175GB-Root-300GB-User':
+                          c_drv = '175'
+                          d_drv = '300'
+                      usage_opt = os.environ.get('UsageOpt')
+                      ws_protocol = os.environ.get('WsProtocol')
+                      ws_os = os.environ.get('WsOs')
+                      response_data,phys_id = create_bundle(img_id,bdl_nm,bdl_desc,cpu_type,c_drv,d_drv)
+                      cfnresponse.send(event, context, cfnresponse.SUCCESS, response_data, phys_id)
+
+                  if event["RequestType"] == "Update":
+                      response_data={'SUCCESS': 'NO UPDATES PERMITTED'}
+                      cfnresponse.send(event, context, cfnresponse.FAILED, response_data) 
+
+                  elif event["RequestType"] == "Delete":
+                      bdl_nm = os.environ.get('BundleNm')
+                      response_data = {}
+                      response_data = delete_bundle(bdl_nm)
+                      cfnresponse.send(event, context, cfnresponse.SUCCESS, response_data)
+
+              except Exception as e:
+                  cfnresponse.send(event, context, cfnresponse.FAILED, response_data)
+     
+          def create_bundle(img_id,bdl_nm,bdl_desc,cpu_type,c_drv,d_drv):
+              client = boto3.client('workspaces')
+              response = client.create_workspace_bundle(
+                  BundleName=bdl_nm,
+                  BundleDescription=bdl_desc,
+                  ImageId=img_id,
+                  ComputeType={
+                      'Name': cpu_type
+                  },
+                  UserStorage={
+                      'Capacity': d_drv
+                  },
+                  RootStorage={
+                      'Capacity': c_drv
+                  },
+                  Tags=[
+                      {
+                          'Key': 'AWS-Starter-Kit-Name',
+                          'Value': 'Windows-Workspaces-Add-On'
+                      },
+                  ]
+              )
+              bdl_id=response['WorkspaceBundle']['BundleId']
+              response_data = {'Success': 'Created Bundle '+bdl_id}
+              phys_id = bdl_id
+              return response_data,phys_id
+
+          def create_bundle_parameters(bdl_id,bdl_nm,bdl_desc,cpu_type,usage_opt,ws_protocol,ws_os):
+              ssmclient = boto3.client('ssm')
+              ssmresponse = ssmclient.put_parameter(
+                  Name=f'/workSpaces/bundle-ids/Workspaces-${bdl_nm}-cpu_type-ws_protocol-usage_opt-ws_os',
+                  Description="Used by Workspaces Automation Starter Kit",
+                  Value=bdl_id,
+                  Type='String',
+                  Overwrite=True
+              )
+              if ssmresponse['ResponseMetadata']['HTTPStatusCode'] == 200:
+                  print(f'Bundle parameter created for {bdl_nm}')
+              ssmresponse = ssmclient.put_parameter(
+                  Name=f'/workSpaces/descriptions/Workspaces-${bdl_nm}-cpu_type-ws_protocol-usage_opt-ws_os',
+                  Description="Used by Workspaces Automation Starter Kit",
+                  Value=f'{bdl_desc}',
+                  Type='String',
+                  Overwrite=True
+              )
+              if ssmresponse['ResponseMetadata']['HTTPStatusCode'] == 200:
+                  print('Successfully created SSM Parameter for Bundle Description')
+
+          def create_ad_group(dom,tld,bdl_nm,bdl_desc,cpu_type,usage_opt,ws_protocol,ws_os):
+              ssmclient = boto3.client('ssm')
+              smclient = boto3.client('secretsmanager')
+              secret_name='AdConnectorCreds'
+              smresponse = smclient.get_secret_value(
+                  SecretId=secret_name
+              )
+              creds = smresponse['SecretString']
+              creds=json.loads(creds)
+              ldap_user = creds['username']
+              ad_user = f'{dom}\\{ldap_user}'
+              ldap_pw = creds['password']
+              group_name = f'Workspaces-${bdl_nm}-cpu_type-ws_protocol-usage_opt-ws_os'
+              group_description=bdl_desc
+              conn = Connection(conn_dc, ad_user, ldap_pw, auto_bind=True)
+              ad_dn = f'cn={group_name},cn=Users,dc={dom},dc={tld}'
+              logger.info(f'Creating group {group_name} in Active Directory')
+              ad_obj_class = 'Group'
+              ad_obj_attribs = {
+                  'groupType': 0x80000002,
+                  'description': group_description,
+                  'info': group_description
+              }
+              result = conn.add(ad_dn, ad_obj_class, ad_obj_attribs)
+              if result==True:
+                  logger.info("AD Group created")
+              elif result!=True:
+                  logger.info("AD Group not created")
+
+          def delete_bundle(bdl_nm):
+              client = boto3.client('workspaces')
+              response = client.describe_workspace_bundles()
+              for bundle in response['Bundles']:
+                  if bundle['Name'] == bdl_nm:
+                      bdl_id=bundle['BundleId']
+                      client.delete_workspace_bundle(
+                          BundleId=bdl_id
+                      )
+                  response_data = {'Success': 'Deleted Bundle'}
+              return response_data
+# Outputs: 
+#   BundleId:
+#     Description: WorkSpace Bundle ID
+#     Value: !Ref CreateWorkspaceBundle
+#     Export: 
+#       Name: !Ref BundleName
