@@ -14,7 +14,7 @@
 # this Starter-Kit. In addition, before deploying this stack:
 #
 # - run the Helper-Script "Utility-Prepare-AD-Connector" in the Helper-Scripts folder on Domain Controller 1
-# - create an AD user for the AD COnnector connection
+# - create an AD user for the AD Connector connection
 # - add that user to the AwsConnectors security group that was created by the "Utility-Prepare-AD-Connector" helper script.
 # - Ensure that the AD user has a passowrd setting of "Password Never Expires". Pro tip: Put the user in it's own Organization Unit in AD
 #   and apply a Group Policy Object to that OU to disable password expiry and rotation only for that user. 
