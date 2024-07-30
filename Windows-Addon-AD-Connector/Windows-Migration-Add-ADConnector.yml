@@ -55,7 +55,7 @@
 #
 AWSTemplateFormatVersion: 2010-09-09
 Description: > 
-  SK-Windows-Migration-Addon-AD-Connector
+  SK-Windows-Migration-Addon-ADConnector
   This template deploys an Active Directory Connector. This is an expansion pack for the Windows Migration Starter-Kit.
 Metadata:
   AWS::CloudFormation::Interface:
@@ -208,6 +208,9 @@ Resources:
             Operation:
               Deidentify:
                 MaskConfig: {} 
+      Tags: 
+        - Key: AWS-Starter-Kit-Name
+          Value: Windows-Workspaces-Add-On
 # This is the Lambda function that creates/delets the AD Connectors.
   AdConnLambdaFunction: 
     Metadata:
@@ -388,3 +391,8 @@ Outputs:
     Value: !Ref DataRedactionAuditLogGroup
     Export:
       Name: "Data-Redaction-Audit-Logs-Group"
+  AdConnectorSecretArn: 
+    Description: The Secret ARN for the AD Connector Credentials
+    Value: !Ref TheSecret
+    Export:
+      Name: "AD-Connector-Secret-ARN"
