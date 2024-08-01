@@ -70,7 +70,7 @@
 AWSTemplateFormatVersion: 2010-09-09
 Description: >
   SK-Windows-Migration
-  This template deploys all AWS components required to run a Migrated Windows Domain in AWS in accordance with the Well-Architected Framework. 
+  This template deploys all AWS components required to host a Well-Architected Migrated Windows Domain. 
   Refer to the Deployment Guide for details.
 # Sections out the Inputs by Required and Optional to make parameters easy to read and use.
 Metadata:

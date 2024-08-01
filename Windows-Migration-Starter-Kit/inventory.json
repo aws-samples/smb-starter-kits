@@ -1,0 +1,92 @@
+{
+    "TopLevelCategory": "AdvancedSolutions",
+    "Category": "Migration",
+    "Kits": [
+        {
+            "Name": "Windows Migration Kit",
+            "Description": "This template deploys all AWS components required to host a Well-Architected Migrated Windows Domain",
+            "Templates": [
+                "azmapper.yml",
+                "windows-migration-starter-kit.yml"
+            ],
+            "UploadRequired": true,
+            "VpcRequired": false
+        }
+    ]
+},
+{
+    "TopLevelCategory": "AdvancedSolutions",
+    "Category": "Migration",
+    "Kits": [
+        {
+            "Name": "Windows Migration AD Connector Add-On",
+            "Description": "This template deploys and AD Connector for the EC2 based Active Directory that was migrated to the VPC with the Windws Migration Starter Kit",
+            "Templates": [
+                "Windows-Migration-Add-ADConnector.yml"
+            ],
+            "UploadRequired": true,
+            "VpcRequired": true
+        }
+    ]
+},
+{
+    "TopLevelCategory": "AdvancedSolutions",
+    "Category": "Migration",
+    "Kits": [
+        {
+            "Name": "Windows Migration WorkSpaces Add-On",
+            "Description": "This template deploys WorkSpaces automation for the EC2 based Active Directory that was migrated to the VPC with the Windws Migration Starter Kit. Workspaces can be deployed, migrated and deleted by adding, deleting or moving users to and from AD Security Groups. See deployment guide for more information.",
+            "Templates": [
+                "WorkSpaces-Starter-Kit.yml"
+            ],
+            "UploadRequired": true,
+            "VpcRequired": true
+        }
+    ]
+},
+{
+    "TopLevelCategory": "AdvancedSolutions",
+    "Category": "Networking",
+    "Kits": [
+        {
+            "Name": "Secure Website Starter Kit For Domains that have been purchased in Route 53",
+            "Description": "This template deploys all AWS components required to host a static website in CloudFront, including the CloudFront distribution, S3 buckets, SSL Certificate and Web Application Firewall. See Scenario 1 in the Deployment Guide for more information.",
+            "Templates": [
+                "Secure-Website-Starter-Kit.yml"
+            ],
+            "UploadRequired": true,
+            "VpcRequired": false
+        }
+    ]
+},
+{
+    "TopLevelCategory": "AdvancedSolutions",
+    "Category": "Networking",
+    "Kits": [
+        {
+            "Name": "Secure Website Starter Kit For Domains wqith Third Party DNS Hosting",
+            "Description": "This template deploys all AWS components required to host a static website in CloudFront, including the CloudFront distribution, S3 buckets, SSL Certificate and Web Application Firewall. See Scenario 3 in the Deployment Guide for more information.",
+            "Templates": [
+                "Secure-Website-With-Third-Party-DNS.yml"
+            ],
+            "UploadRequired": true,
+            "VpcRequired": false
+        }
+    ]
+},
+{
+    "TopLevelCategory": "AdvancedSolutions",
+    "Category": "Networking",
+    "Kits": [
+        {
+            "Name": "Secure Website Starter Kit For Domains with no Route 53 hosted zone created",
+            "Description": "This template deploys all AWS components required to host a static website in CloudFront, including the CloudFront distribution, S3 buckets, SSL Certificate and Web Application Firewall. See Scenario 2 in the Deployment Guide for more information.",
+            "Templates": [
+                "create-hosted-zone.yml",
+                "Secure-Website-With-Third-Party-DNS.yml"
+            ],
+            "UploadRequired": true,
+            "VpcRequired": false
+        }
+    ]
+},
