@@ -19,5 +19,8 @@ This starter kit adds to the capabilities of the Windows Migration Starter Kit b
 Latest Unit Test - 7/30/2024 in us-east-1 region
 This starter kit deploys an automation solution to automate the deployment of WorkSpaces (Virtual Desktops) by adding users to Active Directory Security Groups. Deleting a WorkSpace is achieved by removing the user from the AD Security Group. This allows easy administration of WorkSpaces without having to open the AWS Console. 
 
+**Kit 5 - Amazon QBusiness Starter Kit**
+This starter kit deploys Amazon Q Business for you, using an S3 bucket and Web Crawlers that you specify as data sources for it's knowledge base. 
+
 ## We welcome your feedback!
 Please feel free to raise issues or ask for feature requests. Distributors and Partners are encouraged to download these templates and customize them for their specific governance and use cases. 
